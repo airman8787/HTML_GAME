@@ -93,7 +93,7 @@ body { background: radial-gradient(ellipse at 50% 20%, #29223b, #0b0e1b 72%); }
     <section id="overlay" class="overlay" aria-labelledby="heading">
       <div class="card">
         <h2 id="heading">潮目</h2>
-        <p id="description">月うさぎと夜の参道へ。翡翠の星で火力アップ。月貨を拾うと500点。</p>
+        <p id="description">月うさぎと夜の参道へ。翡翠の星で火力アップ。月貨は500点。25,000点ごとにボムを1個補充。</p>
         <label id="rank-label">難易度 <select id="rank">
           <option value="0">初級</option><option value="1" selected>標準</option>
           <option value="2">上級</option><option value="3">極夜</option>
@@ -103,7 +103,8 @@ body { background: radial-gradient(ellipse at 50% 20%, #29223b, #0b0e1b 72%); }
     </section>
   </div>
   <footer>
-    <span id="key-help">矢印 / WASD 移動 · Z / Space 射撃 · Shift 低速</span>
+    <button type="button" id="bomb" disabled>ボム 2</button>
+    <span id="key-help">矢印 / WASD 移動 · Z / Space 射撃 · Shift 低速 · X ボム</span>
     <span id="touch-help">ドラッグで移動 · 射撃は自動</span>
   </footer>
 </main>
@@ -223,6 +224,33 @@ function percussion(time, snare) {
   source.start(time); source.stop(time + length);
 }
 
+// Wide, slowly opening pad and a brighter singing lead share a stereo hall return.
+let hall;
+function silk(time, duration, note, lead) {
+  const filter = audio.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.Q.value = .8;
+  filter.frequency.setValueAtTime(lead ? 1300 : 500, time);
+  filter.frequency.exponentialRampToValueAtTime(lead ? 4800 : 2200, time + duration * .38);
+  filter.frequency.exponentialRampToValueAtTime(900, time + duration);
+  const envelope = audio.createGain();
+  envelope.gain.setValueAtTime(.0001, time);
+  envelope.gain.exponentialRampToValueAtTime(lead ? .105 : .047, time + (lead ? .035 : .22));
+  envelope.gain.exponentialRampToValueAtTime(.0001, time + duration);
+  filter.connect(envelope).connect(master);
+  envelope.connect(hall);
+  for (const side of [-1,1]) {
+    const osc = audio.createOscillator(), pan = audio.createStereoPanner();
+    osc.type = 'sawtooth'; osc.frequency.value = midiHz(note);
+    osc.detune.value = side * (lead ? 5 : 9);
+    pan.pan.value = side * .68;
+    osc.connect(pan).connect(filter);
+    osc.start(time); osc.stop(time + duration);
+  }
+}
+const theme = [[81,79,77],[77,74,72],[76,79,84],[83,79,76],
+               [81,84,88],[86,82,79],[85,81,76],[82,81,73]];
+
 function sequenceMusic() {
   if (!audio || audio.state !== 'running') return;
   nextBeat = Math.max(nextBeat, audio.currentTime + .007);
@@ -233,8 +261,14 @@ function sequenceMusic() {
     const piano = midiHz(chord[arp[beat]] + 12);
     instrument(nextBeat, .46, piano, 'triangle', .21);
     instrument(nextBeat, .085, piano * 2, 'sine', .055);
-    if (beat === 0 || beat === 4) {
-      for (const note of chord.slice(0,3)) instrument(nextBeat, eighth * 4, midiHz(note), 'sawtooth', .024, .13);
+    if (beat === 0) {
+      for (const note of chord) silk(nextBeat, eighth * 8.6, note, false);
+    }
+    const phrase = theme[Math.floor(step / 8) % theme.length];
+    if (beat === 0 || beat === 3 || beat === 6) {
+      const pitch = phrase[beat / 3];
+      silk(nextBeat, eighth * (beat === 6 ? 1.8 : 2.8), pitch, true);
+      if (boss) instrument(nextBeat, .52, midiHz(pitch + 12), 'sine', .075, .025);
     }
     if (beat % 2 === 0) instrument(nextBeat, .18, 134, 'sine', .52, .003, 42);
     if (beat % 2 === 1) {
@@ -258,7 +292,19 @@ function syncMusic() {
   if (!audio) {
     audio = new AudioEngine();
     master = audio.createGain(); master.gain.value = .42;
-    master.connect(audio.destination);
+    const limiter = audio.createDynamicsCompressor();
+    limiter.threshold.value = -12; limiter.ratio.value = 4;
+    master.connect(limiter).connect(audio.destination);
+    hall = audio.createConvolver();
+    const length = Math.floor(audio.sampleRate * 1.65);
+    const impulse = audio.createBuffer(2, length, audio.sampleRate);
+    for (let c = 0; c < 2; c++) {
+      const samples = impulse.getChannelData(c);
+      for (let i = 0; i < length; i++) samples[i] = (Math.random()*2-1) * (1-i/length)**3;
+    }
+    hall.buffer = impulse;
+    const send = audio.createGain(); send.gain.value = .22;
+    hall.connect(send).connect(master);
     echo = audio.createDelay(); echo.delayTime.value = 60 / 136 * .75;
     const wet = audio.createGain(); wet.gain.value = .16;
     echo.connect(wet).connect(master);
@@ -281,10 +327,41 @@ musicButton.addEventListener('click', () => {
 const meterLabel = document.querySelector('#meter-label');
 const sealDuration = 18;
 let rewardTime = 0;
+const bombButton = document.querySelector('#bomb');
+const bombInterval = 25000;
+const bombDuration = 1.6;
+let bombs, bombLeft, nextBombScore, dropIndex, powerSlot;
+
+function nextDrop() {
+  if (dropIndex === 0) powerSlot = Math.floor(Math.random() * 10);
+  const kind = dropIndex === powerSlot ? 'power' : 'coin';
+  dropIndex = (dropIndex + 1) % 10;
+  return kind;
+}
+
+function canBomb() {
+  return mode === 'playing' && bombs > 0 && bombLeft <= 0 && !warning &&
+    stage !== 'finalReward' && stage !== 'midReward';
+}
+
+function useBomb() {
+  if (!canBomb()) return;
+  bombs--;
+  bombLeft = bombDuration;
+  bullets = [];
+  for (const enemy of [...enemies]) {
+    if (enemy.hp > 0 && enemy.age >= 0 && enemy.x >= 0 && enemy.x <= width &&
+        enemy.y >= 0 && enemy.y <= height) damageEnemy(enemy, 75);
+  }
+  updateHUD();
+}
+
+bombButton.addEventListener('click', () => { useBomb(); bombButton.blur(); });
 
 function reset() {
   rank = Number(rankSelect.value);
   step = 0; rewardTime = 0;
+  bombs = 2; bombLeft = dropIndex = 0; nextBombScore = bombInterval;
   player = { facing: 'north', flip: false, lean: 0, x: width / 2, y: height - 88, radius: 4, life: 3, invincible: 0 };
   enemies = [];
   bullets = [];
@@ -304,6 +381,12 @@ function reset() {
 }
 
 function updateHUD() {
+  while (score >= nextBombScore) {
+    bombs++;
+    nextBombScore += bombInterval;
+  }
+  bombButton.textContent = 'ボム ' + bombs;
+  bombButton.title = '次の補充 ' + nextBombScore.toLocaleString() + '点';
   scoreLabel.textContent = String(score).padStart(6, '0');
   lifeLabel.textContent = player.life;
   grazeLabel.textContent = graze;
@@ -350,6 +433,11 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (mode !== 'playing') return;
+  if (event.code === 'KeyX') {
+    event.preventDefault();
+    if (!event.repeat) useBomb();
+    return;
+  }
   if (event.target instanceof HTMLButtonElement && event.code === 'Space') return;
   if (!movement.has(event.code) && !firing.has(event.code) && !event.code.startsWith('Shift')) return;
   event.preventDefault();
@@ -393,7 +481,10 @@ function ring(enemy, count, offset, speed, form, turn = 0) {
 function volley(enemy) {
   const aim = Math.atan2(player.y - enemy.y - 13, player.x - enemy.x);
   const n = enemy.volley++;
-  if (enemy.kind === 'mid') {
+  if (enemy.kind === 'mid' && enemy.phase === 1) {
+    for (let i = -2-rank; i <= 2+rank; i++) emit(enemy, aim + i * .17, 135, 'pearl');
+    enemy.cooldown = 1.05 - rank * .09;
+  } else if (enemy.kind === 'mid') {
     ring(enemy, 9 + rank * 3, n * .18, 106, 'seal', .14);
     if (n % 2 === 0) ring(enemy, 4 + rank * 2, aim, 145, 'star');
     enemy.cooldown = .72 - .07 * rank;
@@ -443,7 +534,7 @@ const convoys = ['fox','crane','moth','turtle','umbrella','crane','fox','umbrell
 function spawnWave(index) {
   const kind = convoys[index % convoys.length];
   const side = index % 2 ? 1 : -1;
-  const count = (kind === 'turtle' ? 4 : 6) + index % 3;
+  const count = (kind === 'turtle' ? 4 : 6) + index % 3 + [1, 3, 4, 5][rank];
   for (let i = 0; i < count; i++) {
     enemies.push({
       kind, side, baseX: 130 + (index * 79) % 230, x: -100, y: -90,
@@ -485,18 +576,22 @@ function announce(enemy, spell) {
 
 function spawnBoss(final) {
   stage = final ? 'final' : 'crossing';
-  const hp = final ? 1500 + 450 * rank : 160;
+  const hp = final ? 1500 + 450 * rank : 360 + 60 * rank;
   const enemy = {
     kind: final ? 'boss' : 'mid', x: width / 2, y: 114, radius: final ? 34 : 28,
     hp, maxHP: hp, volley: 0, age: 0, phase: 1
   };
   enemies = [enemy];
   bossPanel.hidden = false;
-  bossHP.max = final ? hp : sealDuration;
-  bossHP.value = bossHP.max;
-  bossHP.setAttribute('aria-label', final ? 'ボスの残り体力' : '霊符の残り時間');
-  meterLabel.textContent = final ? 'HP ' + hp + ' / ' + hp : '耐久 ' + sealDuration + '秒';
-  announce(enemy, final ? 1 : 0);
+  bossHP.max = hp;
+  bossHP.setAttribute('aria-label', 'ボスの残り体力');
+  updateBossHP(enemy);
+  if (final) announce(enemy, 1);
+  else {
+    shots = []; bullets = [];
+    enemy.cooldown = 1;
+    document.querySelector('#boss-name').textContent = '潮笛の渡守・澪';
+  }
 }
 
 function burst(x, y, color, count) {
@@ -536,6 +631,7 @@ function updatePlayer(dt) {
 
 function updateEnemies(dt) {
   for (const enemy of enemies) {
+    if (enemy.hp <= 0) continue;
     enemy.age += dt;
     if (enemy.kind === 'boss' || enemy.kind === 'mid') {
       enemy.y = Math.min(133, enemy.y + 106 * dt);
@@ -551,6 +647,34 @@ function updateEnemies(dt) {
   }
 }
 
+function updateBossHP(enemy) {
+  bossHP.value = enemy.hp;
+  const clock = enemy.kind === 'mid' && enemy.phase === 2 ? ' · ' + Math.ceil(enemy.sealLeft) + '秒' : '';
+  meterLabel.textContent = 'HP ' + enemy.hp + ' / ' + enemy.maxHP + clock;
+}
+
+function damageEnemy(enemy, amount) {
+  if (enemy.hp <= 0) return;
+  const mid = enemy.kind === 'mid', final = enemy.kind === 'boss';
+  enemy.hp = Math.max(0, enemy.hp - amount);
+  if (mid && enemy.phase === 1 && enemy.hp <= enemy.maxHP / 2) {
+    enemy.hp = enemy.maxHP / 2;
+    enemy.phase = 2;
+    enemy.sealLeft = sealDuration;
+    announce(enemy, 0);
+  } else if (final && enemy.phase < 4 && enemy.hp <= enemy.maxHP * (1 - enemy.phase / 4)) {
+    enemy.phase++;
+    announce(enemy, enemy.phase);
+  }
+  if (mid || final) updateBossHP(enemy);
+  if (enemy.hp > 0) return;
+  if (!mid && !final) drops.push({ x: enemy.x, y: enemy.y, kind: nextDrop() });
+  score += final ? 5000 : 300;
+  burst(enemy.x, enemy.y, final ? '#ffe4a4' : '#91f3cf', final ? 46 : 13);
+  updateHUD();
+  if (mid || final) awardShower(enemy, final);
+}
+
 function updateShots(dt) {
   for (const shot of shots) {
     shot.x += (shot.vx || 0) * dt;
@@ -560,28 +684,8 @@ function updateShots(dt) {
     );
     if (!enemy) continue;
     shot.y = -30;
-    if (enemy.kind === 'mid') continue;
-    enemy.hp = Math.max(0, enemy.hp - (shot.damage || 1));
-    if (enemy.kind === 'boss') {
-      bossHP.value = enemy.hp;
-      meterLabel.textContent = 'HP ' + enemy.hp + ' / ' + enemy.maxHP;
-    }
-    if (enemy.kind === 'boss' && enemy.phase < 4 && enemy.hp <= enemy.maxHP * (1 - enemy.phase / 4)) {
-      enemy.phase++;
-      announce(enemy, enemy.phase);
-      break;
-    }
-    if (enemy.hp > 0) continue;
-
-    const final = enemy.kind === 'boss';
-    if (!final) drops.push({ x: enemy.x, y: enemy.y, kind: Math.random() < .45 ? 'power' : 'coin' });
-    score += final ? 5000 : 300;
-    burst(enemy.x, enemy.y, final ? '#ffe4a4' : '#91f3cf', final ? 46 : 13);
-    updateHUD();
-    if (final) {
-      awardShower(enemy, true);
-      break;
-    }
+    damageEnemy(enemy, shot.damage || 1);
+    if (warning || !enemies.length) break;
   }
   shots = shots.filter(shot => shot.y > -20);
   enemies = enemies.filter(enemy => enemy.hp > 0 && enemy.y < height + 35 && (enemy.kind !== 'crane' || enemy.age < 5));
@@ -639,6 +743,7 @@ function takeHit() {
 
 function update(dt) {
   age += dt;
+  bombLeft = Math.max(0, bombLeft - dt);
   if (warning) {
     warning.left -= dt;
     if (warning.left <= 0) warning = null;
@@ -691,15 +796,15 @@ function update(dt) {
     return;
   }
   updateEnemies(dt);
-  if (stage === 'crossing') {
+  if (stage === 'crossing' && enemies[0].phase === 2) {
     const mid = enemies[0];
-    const remaining = Math.max(0, sealDuration - mid.age);
-    bossHP.value = remaining;
-    meterLabel.textContent = '耐久 ' + Math.ceil(remaining) + '秒';
-    if (remaining <= 0) { awardShower(mid, false); return; }
+    mid.sealLeft = Math.max(0, mid.sealLeft - dt);
+    updateBossHP(mid);
+    if (mid.sealLeft === 0) { awardShower(mid, false); return; }
   }
   updateShots(dt);
-  if (mode === 'playing') updateHazards(dt);
+  if (bombLeft > 0) bullets = [];
+  else if (mode === 'playing' && !warning) updateHazards(dt);
 }
 
 function drawBackground() {
@@ -821,6 +926,20 @@ function draw() {
     ctx.fillRect(spark.x, spark.y, 3, 3);
   }
   ctx.globalAlpha = 1;
+  if (bombLeft > 0) {
+    const progress = 1 - bombLeft / bombDuration;
+    ctx.save();
+    ctx.globalAlpha = .64 * (1 - progress);
+    ctx.strokeStyle = '#b9fff5';
+    ctx.lineWidth = 5;
+    for (let i = 0; i < 4; i++) {
+      ctx.beginPath(); ctx.arc(player.x, player.y, 18 + (progress + i * .22) % 1 * 870, 0, tau); ctx.stroke();
+    }
+    ctx.fillStyle = '#bff9f5'; ctx.globalAlpha = .12 * (1-progress);
+    ctx.fillRect(0,0,width,height);
+    ctx.restore();
+  }
+  bombButton.disabled = !canBomb();
   if (warning) showSpell();
 }
 
