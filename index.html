@@ -963,15 +963,26 @@ function finishSpell(enemy) {
 }
 
 let checkpoint = saved('checkpoint');
+// Checkpoints mark the start of a stage, the second half after the midboss,
+// the stage boss and the hidden encore.
+const sections = {approach:'', beacon:' 後半', boss:' ボス戦', coda:' 終幕の後'};
+function saveCheckpoint(index, section) {
+  checkpoint = {index, section, pilot:player.pilot, rank, life:player.life,
+    power, score, graze, bombs, dropIndex, powerSlot:powerSlot ?? 0};
+  saved('checkpoint', checkpoint);
+}
 function validCheckpoint(c) {
-  return c && Number.isInteger(c.index) && c.index > 0 && c.index < chapters.length &&
+  const section = c?.section ?? 'approach';
+  return c && Number.isInteger(c.index) && c.index >= 0 && c.index < chapters.length &&
+    Object.hasOwn(sections, section) && (c.index > 0 || section !== 'approach') &&
+    (section !== 'coda' || c.index === chapters.length - 1) &&
     Object.hasOwn(loadouts, c.pilot) && Number.isInteger(c.rank) && c.rank >= 0 && c.rank < 4 &&
     ['life','power','score','graze','bombs','dropIndex','powerSlot'].every(k => Number.isSafeInteger(c[k]) && c[k] >= 0) &&
     c.life > 0 && c.power <= maxPower && c.dropIndex < 10 && c.powerSlot < 10;
 }
 if (validCheckpoint(checkpoint)) {
   resumeButton.hidden = false;
-  resumeButton.textContent = '第' + (checkpoint.index+1) + '面から再開';
+  resumeButton.textContent = '第' + (checkpoint.index+1) + '面' + sections[checkpoint.section ?? 'approach'] + 'から再開';
 }
 resumeButton.addEventListener('click', () => {
   const c = checkpoint;
@@ -986,6 +997,10 @@ resumeButton.addEventListener('click', () => {
   nextExtendScore = (Math.floor(score / extendInterval) + 1) * extendInterval;
   enterChapter(c.index);
   setMode('playing');
+  const section = c.section ?? 'approach';
+  if (section === 'beacon') { stage = 'beacon'; routeTime = nextWave = 0; saveCheckpoint(c.index, 'beacon'); }
+  else if (section === 'boss') spawnBoss(true);
+  else if (section === 'coda') spawnBoss(true, true);
 });
 renderFolio();
 
@@ -1090,9 +1105,7 @@ function setMode(next) {
   resumeButton.hidden = true;
   document.querySelector('#folio').open = false;
   if (next === 'intermission') {
-    checkpoint = {index:chapterIndex+1, pilot:player.pilot, rank, life:player.life,
-      power, score, graze, bombs, dropIndex, powerSlot:powerSlot ?? 0};
-    saved('checkpoint', checkpoint);
+    saveCheckpoint(chapterIndex + 1, 'approach');
   } else if (next === 'clear' || next === 'over') {
     checkpoint = null;
     saved('checkpoint', null);
@@ -1666,6 +1679,7 @@ function spawnBoss(final, secret = false) {
   hiddenBoss = secret;
   if (secret) chapter = {...chapters[4], names:coda.names, spells:coda.spells};
   if (final && !secret) queenBombed = false;
+  if (final) saveCheckpoint(chapterIndex, secret ? 'coda' : 'boss');
   stage = final ? 'final' : 'crossing';
   const hp = Math.round((final ? (1500 + 450 * rank + chapterIndex * 150) * 1.65 : (410 + 70 * rank + chapterIndex * 45) * 1.4) * (secret ? 1.5 : 1));
   const enemy = {
@@ -1932,7 +1946,7 @@ function update(dt) {
     if (rewardTime > 1 && !drops.some(item => item.reward)) {
       if (stage === 'finalReward' && chapterIndex === 4 && !hiddenBoss && !queenBombed) spawnBoss(true, true);
       else if (stage === 'finalReward') setMode(chapterIndex === chapters.length - 1 ? 'clear' : 'intermission');
-      else { stage = 'beacon'; routeTime = nextWave = 0; }
+      else { stage = 'beacon'; routeTime = nextWave = 0; saveCheckpoint(chapterIndex, 'beacon'); }
     }
     return;
   }
