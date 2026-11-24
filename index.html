@@ -112,7 +112,7 @@ body { background: radial-gradient(ellipse at 50% 20%, #29223b, #0b0e1b 72%); }
 <main>
   <header>
     <h1>月蝕奏鳴曲 <span>ECLIPSE SONATA</span></h1>
-    <button id="music" type="button" aria-pressed="true" aria-label="BGM切替">BGM ♪</button>
+    <button id="music" type="button" aria-pressed="false" aria-label="サウンド切替">♪ 試聴</button>
     <button id="pause" type="button" disabled aria-keyshortcuts="Escape P">一時停止</button>
   </header>
   <div class="hud"><span id="chapter-name"></span><span id="extend-target"></span></div>
@@ -402,7 +402,49 @@ const musicBook = [
       ['0 4 7 9 11 . 10 7','8 6 . 4 5 8 9 .','11 . 13 11 9 7 6 4','8 6 4 6 7 . . .'],'10101011','00100010')
   ]
 ];
+// D–A–F–E is the four-note signature heard in the title and capture cadence.
+const overture = scoreTrack('月蝕奏鳴曲 ― 月の縁',82,62,'minor','glass',[0,5,2,4,0,3,5,4],
+  ['0 . 4 . 2 1 . .','0 . . 2 5 . 4 .','7 . 6 . 4 . 2 .','1 . . 4 1 . 0 .'],'00000000','00000000');
+const hiddenTheme = scoreTrack('虚音 ― 裏月のフーガ',170,62,'harmonic','organ',[0,4,5,2,3,5,4,0],
+  ['0 4 2 1 . 4 7 6','4 . 8 7 6 4 2 .','9 7 . 6 4 2 3 1','6 . 4 2 1 . 0 .'],'10011010','00100010');
 let currentTrack;
+function overtureBeat(step,t,eighth) {
+  const beat = step%8, bar = Math.floor(step/8)%8;
+  const root = overture.roots[bar], degree = overture.phrases[bar%4][beat];
+  if (degree !== null) playLead(overture,t,eighth*1.5,pitch(overture,degree)+12);
+  if (beat === 0) {
+    for (const interval of [0,2,4]) silk(t,eighth*7.8,pitch(overture,root+interval)-12,false);
+    instrument(t,eighth*5,midiHz(pitch(overture,root)-24),'sine',.17,.08);
+  }
+  if (bar >= 2 && beat%2 === 1)
+    instrument(t,eighth*1.8,midiHz(pitch(overture,root+[0,4,2,6][beat>>1])),'triangle',.085);
+  if (bar >= 4 && beat === 6)
+    instrument(t,eighth*1.7,midiHz(pitch(overture,root+7)),'sine',.10,.04);
+}
+function soundCue(kind) {
+  if (!musicEnabled || audio?.state !== 'running') return;
+  const t = audio.currentTime+.006;
+  const tone = (dt,d,n,voice,g,end) =>
+    instrument(t+dt,d,midiHz(n),voice,g,.004,end === undefined ? undefined : midiHz(end));
+  if (kind === 'capture' || kind === 'spell') {
+    const notes = kind === 'capture' ? [74,81,77,76,86] : [74,81,77,76];
+    notes.forEach((n,i)=>tone(i*.09,.30,n,kind==='capture'?'triangle':'sine',.16));
+  } else if (kind === 'bomb') {
+    tone(0,.62,53,'sine',.48,28);
+    for (let i=0;i<4;i++) tone(.045*i,.35,62+5*i,'triangle',.14);
+  } else if (kind === 'hit') {
+    tone(0,.22,69,'triangle',.26,41); tone(.04,.3,47,'sine',.28,32);
+  } else if (kind === 'power') {
+    tone(0,.12,78,'sine',.15); tone(.06,.22,85,'triangle',.13);
+  } else if (kind === 'coin') {
+    if (t-lastCoin < .10) return;
+    lastCoin=t; tone(0,.08,89,'sine',.07);
+  } else if (kind === 'shot') {
+    const fox = player.pilot==='ember';
+    tone(0,fox?.10:.055,fox?70:85,fox?'triangle':'sine',fox?.060:.045,fox?47:74);
+  }
+}
+let lastCoin = -1;
 function pitch(track, degree) {
   return track.tonic + 12*Math.floor(degree/7) + track.scale[(degree%7+7)%7];
 }
@@ -460,7 +502,7 @@ function scoreBeat(track,boss,step,t,eighth) {
 function sequenceMusic() {
   if (!audio || audio.state !== 'running') return;
   const boss = stage === 'final' || stage === 'finalReward';
-  const track = musicBook[chapterIndex][Number(boss)];
+  const track = mode === 'title' ? overture : hiddenBoss && boss ? hiddenTheme : musicBook[chapterIndex][Number(boss)];
   if (currentTrack !== track) {
     currentTrack = track;
     step = 0;
@@ -470,14 +512,15 @@ function sequenceMusic() {
   nextBeat = Math.max(nextBeat,audio.currentTime+.007);
   const eighth = 30 / track.bpm;
   while (nextBeat < audio.currentTime+.11) {
-    scoreBeat(track,boss,step++,nextBeat,eighth);
+    if (track === overture) overtureBeat(step++,nextBeat,eighth);
+    else scoreBeat(track,boss,step++,nextBeat,eighth);
     nextBeat += eighth;
   }
 }
 
 function syncMusic() {
   clearInterval(musicTimer);
-  if (!musicEnabled || mode !== 'playing') {
+  if (!musicEnabled || !['title','playing','dialogue'].includes(mode)) {
     if (audio) audio.suspend().catch(() => {});
     return;
   }
@@ -506,16 +549,27 @@ function syncMusic() {
     const samples = noise.getChannelData(0);
     for (let i = 0; i < samples.length; i++) samples[i] = Math.random() * 2 - 1;
   }
+  master.gain.setTargetAtTime(mode === 'dialogue' ? .22 : .42,audio.currentTime,.09);
+  musicButton.textContent = '音 ON';
+  musicButton.setAttribute('aria-pressed','true');
   nextBeat = audio.currentTime + .04;
   audio.resume().catch(() => {});
   musicTimer = setInterval(sequenceMusic, 30);
 }
 musicButton.addEventListener('click', () => {
-  musicEnabled = !musicEnabled;
-  musicButton.textContent = musicEnabled ? 'BGM ♪' : 'BGM OFF';
+  musicEnabled = audio ? !musicEnabled : true;
+  musicButton.textContent = musicEnabled ? '音 ON' : '音 OFF';
   musicButton.setAttribute('aria-pressed', String(musicEnabled));
   syncMusic();
   musicButton.blur();
+});
+
+function unlockTitle(event) {
+  if (mode === 'title' && !audio && musicEnabled && !musicButton.contains(event.target) && event.target !== action) syncMusic();
+}
+document.addEventListener('click', unlockTitle);
+document.addEventListener('keydown', event => {
+  if (!event.repeat && !['Shift','Control','Alt','Meta'].includes(event.key)) unlockTitle(event);
 });
 
 const meterLabel = document.querySelector('#meter-label');
@@ -560,6 +614,7 @@ function finishSpell(enemy) {
   const name = enemy.captureName;
   enemy.captureName = null;
   if (!name || collected.has(name)) return;
+  soundCue('capture');
   collected.add(name);
   saved(name, true);
   renderFolio();
@@ -610,6 +665,7 @@ function canBomb() {
 function useBomb() {
   if (!canBomb()) return;
   if (chapterIndex === 4 && stage === 'final' && !hiddenBoss) queenBombed = true;
+  soundCue('bomb');
   bombs--;
   bombX = player.x;
   bombLeft = bombDuration;
@@ -1013,6 +1069,7 @@ function followConvoy(enemy) {
 }
 
 function announce(enemy, spell) {
+  soundCue('spell');
   enemy.captureName = chapter.spells[spell];
   warning = { spell, left: 1.9 };
   bullets = [];
@@ -1086,6 +1143,7 @@ function updatePlayer(dt) {
   player.invincible = Math.max(0, player.invincible - dt);
 
   if ((touchMode || keys.has('KeyZ') || keys.has('Space')) && age >= nextShot) {
+    soundCue('shot');
     if (player.pilot === 'ember') {
       shots.push({ x:player.x, y:player.y-26, damage:4+power, radius:4+power*.6,
         hitsLeft:2+Math.floor(power/3), struck:new Set() });
@@ -1212,6 +1270,7 @@ function updateHazards(dt) {
 
 function takeHit() {
   for (const enemy of enemies) if (enemy.captureName) enemy.captureName = null;
+  soundCue('hit');
   player.life--;
   player.invincible = 1.65;
   bullets = bullets.filter(bullet => Math.hypot(bullet.x - player.x, bullet.y - player.y) > 125);
@@ -1266,6 +1325,7 @@ function update(dt) {
       item.y += dy * 8 * dt;
     }
     if (distance < 18) {
+      soundCue(item.kind);
       if (item.kind === 'power') power = Math.min(maxPower, power + 1);
       score += item.kind === 'coin' ? 500 : 80;
       burst(item.x, item.y, '#ffe681', 8);
