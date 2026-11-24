@@ -30,4 +30,10 @@
 
 ## 自分の PC で遊ぶ
 
-`index.html` をダウンロードしてブラウザで開くだけで動きます。
+`index.html` と `soundfont.js` を同じフォルダに置き、`index.html` をブラウザで開くだけで動きます。
+`soundfont.js` がなくても遊べますが、その場合 BGM はすべて合成音になります。
+
+## クレジット
+
+- 楽器音源: FluidR3_GM（Frank Wen）— [Creative Commons Attribution 3.0](https://creativecommons.org/licenses/by/3.0/)。
+  MP3 化されたもの（[gleitz/midi-js-soundfonts](https://github.com/gleitz/midi-js-soundfonts)）から、必要な音域を 3 半音おきに抜き出して `soundfont.js` に収録しています。
