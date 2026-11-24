@@ -80,6 +80,12 @@ body { background: radial-gradient(ellipse at 50% 20%, #29223b, #0b0e1b 72%); }
 #folio-list { line-height:1.6; }
 #capture { position:absolute; bottom:12%; width:100%; text-align:center; color:#ffe7a7; text-shadow:0 1px 4px #000; pointer-events:none; }
 #resume { margin-top:6px; }
+.conversation { align-items:end; background:linear-gradient(transparent 46%, #0c0c20c9); }
+.conversation .card { width:100%; text-align:left; }
+.conversation h2 { font-size:14px; color:#e7c68e; }
+.conversation #description { font-size:14px; color:#f3ecf6; }
+.conversation strong { display:inline-block; margin-top:5px; color:#8fe3d2; }
+.conversation strong + br ~ strong { color:#e4b5eb; }
 </style>
 </head>
 <body>
@@ -239,6 +245,40 @@ const chapters = [
   { title:'蝕月の浮宮', map:'map5', mid:'mid5', boss:'boss5', names:['星図の司書・宵','蝕冠の女王・朔'],
     spells:['音譜・黄道の夜想曲','音譜・欠けゆく天蓋','音譜・双星の軌道','音譜・紫紺の流星群','音譜・終蝕・夜明けの環'] }
 ];
+const coda = {
+  title:'裏譜　月の裏声', names:['','月裏の歌姫・虚音'],
+  spells:['','裏譜・逆さの産声','裏譜・双子の心拍','裏譜・喰月の輪唱','裏譜・明け渡す空']
+};
+// Each encounter has an arrival and a farewell, each with one line per speaker.
+const exchanges = {
+  rabbit: [
+    ['川の音が逆さだよ。澪さん、お魚は無事？','魚は舟に避難させたよ。あんたはこの波を渡れるかい？','小さな尾びれが見えた。もう泳げそうだね。','ああ。灯籠を追いな、あの灯守が何か聞いてる。'],
+    ['燈花さん、灯籠が川上へ帰りたがってるよ。','ひとつ捕まえてごらん。芯が歌っているから。','耳を当てたら、水晶をこする音がした！','いい耳だね。底流への石段を照らしてあげる。'],
+    ['盾の裏で、だれか泣いてるの？','晶洞の反響だ。近づくなら耳を守りな。','ほんとだ、私の鼻声まで返ってきた。','奥の后なら、最初の一音を覚えている。'],
+    ['玻璃さん、その水晶に昨日の音は残ってる？','ええ。けれど触れたら一斉に鳴くわよ。','紅葉を踏む足音だ。秋の匂いまでしそう。','紅橋を訪ねなさい。あの足音には続きがあるわ。'],
+    ['その扇、風のない方へ葉っぱを送ってるよ。','よく見てるね。葉の行く先、一緒に当てっこしよ。','あ、橋の下！　葉っぱが五線に並んだ！','正解。最後の一枚は鹿乃さまが持ってるよ。'],
+    ['鹿乃さん、最後の葉を貸してくれる？','渡す前に、この橋の拍を踏んでおくれ。','こつ、こつ、りん。最後だけ鈴だね。','峠の音が紛れてる。凍えぬように行きなさい。'],
+    ['小夜ちゃん、手が真っ赤。鈴を持とうか？','だめ、離すと夜がひとつ長くなるの。聞いてて。','鳴りやんだね。今のうちに手を温めよ。','ありがとう。大鐘の下まで足跡をつけておいたよ。'],
+    ['六花さん、朝を呼ぶ鐘が苦しそうだよ。','誰かが月から綱を引く。私と一緒に緩めて。','綱の先、お月さまにお城が映ってる！','浮宮へお行き。あそこから夜を引き延ばしている。'],
+    ['星図に穴があいてる。誰か星を消したの？','朔さまが朝の星をお隠しに。ここから先は禁書です。','穴から朝の光がもれてるよ。まだ間に合うね。','その光を辿って。女王は譜面台の前にいます。'],
+    ['朔さん、眠れない子がいるの。どうして朝を隠したの？','この夜にだけ妹の声が残る。私が五つの境の拍を止めた。','私も一緒に覚えるよ。その歌、ひとりで抱えなくていいよ。','……なら、最後の小節を。あの子はいつも小声で歌うの。'],
+    ['聞こえたよ、虚音ちゃん。お姉さんの後ろで歌ってたんだね。','朝が来たら消える声よ。それでも最後まで聴ける？','聴いたよ。明日も私、その続きを歌えるよ。','じゃあ最初の音をあげる。姉さんを起こすのに使って。']
+  ],
+  ember: [
+    ['逆流の起点を探してる。渡し賃は後払いでいいか？','強気だね、狐。舟より速いなら通してやるよ。','舟を出すまでもなかったな。次の番人は？','灯守の燈花さ。あの灯だけ流れに逆らってる。'],
+    ['妙な火だ。私の狐火でもこんな影は落ちない。','腕に覚えがあるなら、火芯に混じった影を抜いて。','抜いたぞ。水晶の欠片が芯を噛んでた。','その欠片が道標よ。底流に持っていきな。'],
+    ['盾に残った傷、内側からだな。何を閉じ込めた？','暴れる反響だ。割らずに通れる腕を見せろ。','盾は無傷だ。修理代は請求するなよ。','はっ、通れ。音の出所は后の鏡に映っている。'],
+    ['玻璃、鏡を借りる。送り主の顔が見たい。','曇らせないでね。鏡面はあなたの炎にも反撃するわ。','顔は映らんが、橋桁の朱は見覚えがある。','紅橋よ。欠片は置いていって、証拠はもう見たでしょう。'],
+    ['風上に散る紅葉か。扇の仕掛けを見せな。','手品師に種を聞くの？　見破ったら教えるよ。','扇は囮だ。橋の下から拍が来てる。','ばれちゃった。鹿乃さまには内緒にしてよね。'],
+    ['橋の拍を借りた奴がいる。通行帳を出してくれ。','帳面より確かなものがある。私の足拍子を追いな。','一拍だけ金属音だ。峠の大鐘だな。','耳も利く狐だ。雪に足を取られるんじゃないよ。'],
+    ['鈴の縄が擦り切れてる。そいつを寄越しな。','切ったら鐘楼が埋まるよ。揺れを先に止めて！','揺れは止めた。縄は私の帯で結んどけ。','助かった。六花さまのところまで雪戸を開けるよ。'],
+    ['鐘楼を押さえた。綱を引く奴の名を聞こうか。','綱を手繰れるなら、その目で確かめるがいい。','月の紋に女王の署名。随分と堂々たる犯行だ。','朔の居城は頭上よ。綱を伝えば追いつける。'],
+    ['司書殿、禁書の貸し出しだ。女王の命令書を頼む。','閲覧料は高いですよ。星の列を抜けてみせて。','命令書は写した。原本は返すよ、律儀なもんだろ。','返却期限前とは珍しい。謁見室は右手です。'],
+    ['朔、五つの現場で同じ署名を拾った。言い分は？','私が命じた。妹の声を朝に奪わせるものか。','譜面台から手を離せ。あとは私が聴き届ける。','狐火を下げて。小さな声なの、驚かせないで。'],
+    ['息継ぎが二人分。出てきな、月の裏の歌い手。','名は虚音。姉の声を借りずに歌うのは初めてよ。','いい独唱だった。夜を盗まなくても客は来るさ。','最初の客が狐とはね。姉に半券を渡しておいて。']
+  ]
+};
+let hiddenBoss = false, queenBombed = false;
 let chapter = chapters[0], chapterIndex = 0;
 const forms = {
   note: { radius: 5, color: '#ffe4aa' },
@@ -482,15 +522,16 @@ function saved(key, value) {
     document.querySelector('#save-error').hidden = false;
   }
 }
-const collected = new Set(chapters.flatMap(c => c.spells).filter(name => saved(name) === true));
+const folioChapters = [...chapters, {...coda, spells:coda.spells.slice(1)}];
+const collected = new Set(folioChapters.flatMap(c => c.spells).filter(name => saved(name) === true));
 function renderFolio() {
-  document.querySelector('#folio summary').textContent = '音譜帳　' + collected.size + ' / ' + chapters.reduce((n,c) => n + c.spells.length, 0);
+  document.querySelector('#folio summary').textContent = '音譜帳　' + collected.size + ' / ' + folioChapters.reduce((n,c) => n + c.spells.length, 0);
   const list = document.querySelector('#folio-list');
   list.replaceChildren();
-  for (const [i,c] of chapters.entries()) {
+  for (const [i,c] of folioChapters.entries()) {
     const row = document.createElement('p');
     const names = c.spells.filter(name => collected.has(name));
-    row.textContent = '第' + (i+1) + '面　' + c.title + '（' + names.length + '/5）　' + names.join('、');
+    row.textContent = (i < chapters.length ? '第' + (i+1) + '面　' : '') + c.title + '（' + names.length + '/' + c.spells.length + '）　' + names.join('、');
     list.append(row);
   }
 }
@@ -547,6 +588,7 @@ function canBomb() {
 
 function useBomb() {
   if (!canBomb()) return;
+  if (chapterIndex === 4 && stage === 'final' && !hiddenBoss) queenBombed = true;
   bombs--;
   bombX = player.x;
   bombLeft = bombDuration;
@@ -576,6 +618,7 @@ function reset() {
 }
 
 function enterChapter(index) {
+  hiddenBoss = queenBombed = false;
   chapterIndex = index;
   chapter = chapters[index];
   document.querySelector('#chapter-name').textContent = '第' + (index + 1) + '面　' + chapter.title;
@@ -622,6 +665,8 @@ function updateHUD() {
 
 function setMode(next) {
   mode = next;
+  overlay.classList.toggle('conversation', next === 'dialogue');
+  document.querySelector('#folio').hidden = next === 'dialogue';
   resumeButton.hidden = true;
   document.querySelector('#folio').open = false;
   if (next === 'intermission') {
@@ -647,7 +692,7 @@ function setMode(next) {
   const messages = {
     paused: ['一時停止', 'ここから再開できます。', '再開'],
     intermission: [chapter.title + '　突破', '獲得スコア累計 ' + score, '次の面へ'],
-    clear: ['夜明けの参道', '五つの境を越え、' + loadouts[player.pilot].name + 'は朝日に照らされた参道へ帰り着いた。最終スコア ' + score + ' · グレイズ ' + graze, 'もう一度'],
+    clear: [hiddenBoss ? '真終幕　ふたりの夜明け' : '夜明けの参道', '五つの境を越え、' + loadouts[player.pilot].name + 'は朝日に照らされた参道へ帰り着いた。最終スコア ' + score + ' · グレイズ ' + graze, 'もう一度'],
     over: ['ゲームオーバー', 'スコア ' + score + ' · グレイズ ' + graze, 'もう一度']
   };
   if (messages[mode]) {
@@ -662,6 +707,7 @@ function togglePause() {
 }
 
 action.addEventListener('click', () => {
+  if (mode === 'dialogue') { setMode('playing'); return; }
   if (mode === 'intermission') enterChapter(chapterIndex + 1);
   else if (mode !== 'paused') {
     checkpoint = null;
@@ -673,6 +719,11 @@ action.addEventListener('click', () => {
 pause.addEventListener('click', togglePause);
 
 document.addEventListener('keydown', event => {
+  if (mode === 'dialogue' && ['KeyZ','Space','Enter'].includes(event.code)) {
+    event.preventDefault();
+    if (!event.repeat) action.click();
+    return;
+  }
   if (event.code === 'Escape' || event.code === 'KeyP') {
     if (!event.repeat) togglePause();
     return;
@@ -763,7 +814,16 @@ function volley(enemy) {
   const aim = Math.atan2(player.y - enemy.y - 13, player.x - enemy.x);
   const n = enemy.volley++;
   const firstBullet = bullets.length;
-  if (chapterIndex && (enemy.kind === 'boss' || (enemy.kind === 'mid' && enemy.phase === 2))) {
+  if (hiddenBoss && enemy.kind === 'boss') {
+    const rays = densities[rank].rays + 2*enemy.phase;
+    const spin = n*.21;
+    ring(enemy, rays, spin, 124, 'moon', .24);
+    ring(enemy, rays, -spin, 148, 'note', -.24);
+    if (n % 3 === 0) {
+      for (let i = -enemy.phase; i <= enemy.phase; i++) emit(enemy, aim + i*.13, 176, 'star');
+    }
+    enemy.cooldown = .90 - .06*rank - .07*enemy.phase;
+  } else if (chapterIndex && (enemy.kind === 'boss' || (enemy.kind === 'mid' && enemy.phase === 2))) {
     chapterVolley(enemy, aim, n);
   } else if (enemy.kind === 'mid' && enemy.phase === 1) {
     for (let i = -2-rank; i <= 2+rank; i++) emit(enemy, aim + i * .17, 135, 'pearl');
@@ -940,16 +1000,34 @@ function announce(enemy, spell) {
   document.querySelector('#boss-name').textContent = chapter.names[spell ? 1 : 0] + ' ／ ' + chapter.spells[spell];
 }
 
-function spawnBoss(final) {
+function conversation(final, farewell) {
+  const id = hiddenBoss ? 10 : chapterIndex*2 + Number(final);
+  const lines = exchanges[player.pilot][id];
+  const offset = farewell ? 2 : 0;
+  setMode('dialogue');
+  heading.textContent = farewell ? '戦いのあと' : '会敵';
+  description.replaceChildren();
+  for (const [speaker, line] of [[loadouts[player.pilot].name, lines[offset]], [chapter.names[Number(final)], lines[offset+1]]]) {
+    const label = document.createElement('strong');
+    label.textContent = speaker;
+    description.append(label, document.createElement('br'), line, document.createElement('br'));
+  }
+  action.textContent = farewell ? '先へ' : '戦闘開始';
+  action.focus();
+}
+function spawnBoss(final, secret = false) {
+  hiddenBoss = secret;
+  if (secret) chapter = {...chapters[4], names:coda.names, spells:coda.spells};
+  if (final && !secret) queenBombed = false;
   stage = final ? 'final' : 'crossing';
   const hp = final ? 1500 + 450 * rank + chapterIndex * 150 : 410 + 70 * rank + chapterIndex * 45;
   const enemy = {
     kind: final ? 'boss' : 'mid', x: width / 2, y: 114, radius: final ? 34 : 28,
-    hp, maxHP: hp, volley: 0, age: 0, phase: 1
+    hp: secret ? hp*1.5 : hp, maxHP: secret ? hp*1.5 : hp, volley: 0, age: 0, phase: 1
   };
   enemies = [enemy];
   bossPanel.hidden = false;
-  bossHP.max = hp;
+  bossHP.max = enemy.maxHP;
   bossHP.setAttribute('aria-label', 'ボスの残り体力');
   updateBossHP(enemy);
   if (final) announce(enemy, 1);
@@ -958,6 +1036,7 @@ function spawnBoss(final) {
     enemy.cooldown = 1;
     document.querySelector('#boss-name').textContent = chapter.names[0];
   }
+  conversation(final, false);
 }
 
 function burst(x, y, color, count) {
@@ -1074,6 +1153,7 @@ function awardShower(enemy, final) {
   rewardTime = 0;
   bossPanel.hidden = true;
   enemies = []; bullets = []; shots = [];
+  conversation(final, true);
   const count = final ? 48 : 32;
   for (let i = 0; i < count; i++) {
     const angle = i * 2.4;
@@ -1176,7 +1256,8 @@ function update(dt) {
   if (rewarding) {
     shots = [];
     if (rewardTime > 1 && !drops.some(item => item.reward)) {
-      if (stage === 'finalReward') setMode(chapterIndex === chapters.length - 1 ? 'clear' : 'intermission');
+      if (stage === 'finalReward' && chapterIndex === 4 && !hiddenBoss && !queenBombed) spawnBoss(true, true);
+      else if (stage === 'finalReward') setMode(chapterIndex === chapters.length - 1 ? 'clear' : 'intermission');
       else { stage = 'beacon'; routeTime = nextWave = 0; }
     }
     return;
@@ -1261,8 +1342,10 @@ function showSpell() {
   ctx.lineTo(width, 377); ctx.lineTo(0, 404);
   ctx.closePath(); ctx.clip();
   const zoom = 1.06 + .045 * elapsed;
+  if (hiddenBoss) ctx.filter = 'hue-rotate(135deg) saturate(1.6)';
   ctx.drawImage(sheet, 0, chapterIndex * stripHeight + 1, sheet.width, stripHeight - 2,
     -elapsed * 8, 216, width * zoom, 192);
+  ctx.filter = 'none';
   for (let i = 0; i < 5; i++) {
     const x = (i * 90 + elapsed * 48) % width;
     drawNote(x, 367 - 14 * Math.sin(i + elapsed * 2), -.18);
@@ -1304,7 +1387,16 @@ function draw() {
       ctx.lineWidth = 2;
       ctx.beginPath(); ctx.ellipse(enemy.x,enemy.y,49,36,enemy.age*.5,0,tau); ctx.stroke();
       const final = enemy.kind === 'boss';
+      ctx.save();
+      if (hiddenBoss) {
+        ctx.filter = 'hue-rotate(135deg) saturate(1.6)';
+        for (let i=0; i<6; i++) {
+          const a = enemy.age*1.4 + i*tau/6;
+          drawNote(enemy.x+57*Math.cos(a), enemy.y+27*Math.sin(a), a);
+        }
+      }
       drawCharacter(final ? chapter.boss : chapter.mid, enemy.x, enemy.y, final ? 108 : 88);
+      ctx.restore();
     } else {
       if (enemy.age >= 0) drawCharacter(enemy.kind, enemy.x, enemy.y, spirits[enemy.kind].size);
     }
