@@ -57,6 +57,8 @@ h2 { margin: 0; font-size: clamp(19px, 5.8vw, 36px); }
 progress { width: 100%; height: 10px; accent-color: #ffb889; display: block; margin-top: 3px; }
 footer { margin-top: 8px; font-size: 11px; line-height: 1.5; color: var(--muted); }
 #touch-help { display: none; }
+.assist[aria-pressed="true"] { background: #f5cf81; color: #241a10; border-color: #ffe1ad; }
+footer { flex-wrap: wrap; }
 @media (pointer: coarse) {
   #key-help { display: none; }
   #touch-help { display: inline; }
@@ -142,13 +144,15 @@ body { background: radial-gradient(ellipse at 50% 20%, #29223b, #0b0e1b 72%); }
         </select></label>
         <button id="action" type="button">出撃</button>
         <button id="resume" type="button" hidden></button>
-        <details id="folio"><summary></summary><p>音譜を被弾せず突破すると収録。ボムも使えます。</p><div id="folio-list"></div></details>
+        <details id="folio"><summary></summary><p>音譜を被弾せず突破すると収録。ボムも使えます。自動ボム・オートが ON のときは収録されません。</p><div id="folio-list"></div></details>
         <small id="save-error" role="status" hidden>このブラウザでは記録を保存できません。</small>
       </div>
     </section>
   </div>
   <footer>
     <button type="button" id="bomb" disabled>ボム 2</button>
+    <button type="button" id="autobomb" class="assist" aria-pressed="false" title="被弾した瞬間に自動でボムを使います。ON の間は音譜を獲得できません。" hidden>自動ボム OFF</button>
+    <button type="button" id="autopilot" class="assist" aria-pressed="false" title="自動で弾を避けて撃ちます。ON の間は音譜を獲得できません。" hidden>オート OFF</button>
     <span id="key-help">矢印 / WASD 移動 · Z / Space 射撃 · Shift 低速（判定表示） · X ボム（被弾直後でも有効）</span>
     <span id="touch-help">ドラッグで移動 · 射撃は自動</span>
   </footer>
@@ -239,7 +243,7 @@ let mode = 'title';
 let player, enemies, bullets, shots, sparks;
 const pilotSelect = document.querySelector('#pilot');
 const loadouts = {
-  rabbit: { name:'月うさぎ', portrait:'rabbit', info:'拡散型。被弾判定は自機中央の白点だけ。星猫が増え、扇状に援護射撃。ボム「月波」は画面全体を均等に攻撃。' },
+  rabbit: { name:'月うさぎ', portrait:'rabbit', info:'拡散型。被弾判定は自機中央の小さな点だけ（低速移動中に表示）。星猫が増え、扇状に援護射撃。ボム「月波」は画面全体を均等に攻撃。' },
   ember: { name:'黒狐・朱音', portrait:'ember_south', info:'集中型。音叉から正面に貫通弾。星で威力・太さ・貫通数が上昇。ボム「陽炎柱」は自機の縦列に大ダメージ。' }
 };
 function previewPilot() {
@@ -250,6 +254,31 @@ function previewPilot() {
 }
 pilotSelect.addEventListener('change', previewPilot);
 const rankSelect = document.querySelector('#rank');
+// Assists: an automatic death-bomb on 初級 and 標準, and an autopilot on 初級.
+// Spells fought with any assist switched on cannot be captured.
+const autoBombButton = document.querySelector('#autobomb');
+const autoPilotButton = document.querySelector('#autopilot');
+const assist = {bomb:false, pilot:false};
+try { Object.assign(assist, JSON.parse(localStorage.getItem('tideline.v1.assist')) || {}); } catch {}
+function assistRank() {
+  return ['playing', 'paused', 'dialogue', 'intermission'].includes(mode) ? rank : Number(rankSelect.value);
+}
+const autoPilotOn = () => assist.pilot && assistRank() === 0;
+const autoBombOn = () => (assist.bomb && assistRank() <= 1) || autoPilotOn();
+function refreshAssist() {
+  const r = assistRank();
+  autoBombButton.hidden = r > 1;
+  autoPilotButton.hidden = r > 0;
+  autoBombButton.textContent = '自動ボム ' + (autoBombOn() ? 'ON' : 'OFF');
+  autoBombButton.setAttribute('aria-pressed', String(autoBombOn()));
+  autoBombButton.disabled = autoPilotOn();
+  autoPilotButton.textContent = 'オート ' + (autoPilotOn() ? 'ON' : 'OFF');
+  autoPilotButton.setAttribute('aria-pressed', String(autoPilotOn()));
+  try { localStorage.setItem('tideline.v1.assist', JSON.stringify(assist)); } catch {}
+}
+autoBombButton.addEventListener('click', () => { assist.bomb = !assist.bomb; refreshAssist(); autoBombButton.blur(); });
+autoPilotButton.addEventListener('click', () => { assist.pilot = !assist.pilot; refreshAssist(); autoPilotButton.blur(); });
+rankSelect.addEventListener('change', refreshAssist);
 const maxPower = 9;
 let rank = 1;
 let score, graze, age, nextWave, nextShot;
@@ -1040,6 +1069,7 @@ bombButton.addEventListener('click', () => { useBomb(); bombButton.blur(); });
 
 function reset() {
   rank = Number(rankSelect.value);
+  queueMicrotask(refreshAssist);
   captureNotice.hidden = true; captureTime = 0;
   step = 0;
   nextExtendScore = extendInterval; extendTime = 0; extendNotice.hidden = true;
@@ -1185,7 +1215,7 @@ canvas.addEventListener('pointerdown', event => {
   pointer = { id: event.pointerId, x: event.clientX, y: event.clientY };
 });
 canvas.addEventListener('pointermove', event => {
-  if (pointer?.id !== event.pointerId) return;
+  if (pointer?.id !== event.pointerId || autoPilotOn()) return;
   faceMotion(event.clientX - pointer.x, event.clientY - pointer.y);
   const rect = canvas.getBoundingClientRect();
   player.x = clamp(player.x + (event.clientX - pointer.x) * width / rect.width, 16, width - 16);
@@ -1724,16 +1754,61 @@ function faceMotion(dx, dy) {
   player.lean = dx && dy ? Math.sign(dx) * .18 : 0;
 }
 
+// Autopilot: try each direction at both speeds, predict nearby bullets in a
+// straight line for half a second, and take the safest move that also keeps
+// the pilot under its target and in the lower field.
+function autopilotMove() {
+  const boss = enemies.find(e => e.kind === 'boss' || e.kind === 'mid');
+  let target = boss;
+  if (!target) {
+    let nearest = Infinity;
+    for (const e of enemies) {
+      if (e.hp <= 0 || e.age < 0 || e.y < 0) continue;
+      const d = Math.abs(e.x - player.x) + Math.max(0, e.y - player.y + 120) * 3;
+      if (d < nearest) { nearest = d; target = e; }
+    }
+  }
+  const goalX = target ? target.x : width / 2, goalY = height - 115;
+  const near = bullets.filter(b => !(b.delay > 0) && !b.dead &&
+    Math.abs(b.x - player.x) < 230 && Math.abs(b.y - player.y) < 230);
+  let best = null;
+  for (const speed of [325, 145]) for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+    const step = speed / (Math.hypot(dx, dy) || 1);
+    let cost = 0;
+    for (let i = 1; i <= 10; i++) {
+      const tau = i * .05;
+      const px = clamp(player.x + dx * step * tau, 16, width - 16), py = clamp(player.y + dy * step * tau, 25, height - 20);
+      for (const b of near) {
+        const v = b.hold && b.t < b.hold ? 0 : b.v;
+        const d = Math.hypot(b.x + Math.cos(b.a) * v * tau - px, b.y + Math.sin(b.a) * v * tau - py) - forms[b.form].hit - player.radius;
+        if (d < 4) cost += 2000 / i;
+        else if (d < 30) cost += (30 - d) ** 2 * .5 / i;
+      }
+      for (const e of enemies) {
+        if (e.hp > 0 && e.age >= 0 && Math.hypot(e.x - px, e.y - py) < e.radius + 14) cost += 1500 / i;
+      }
+    }
+    const fx = clamp(player.x + dx * step * .15, 16, width - 16), fy = clamp(player.y + dy * step * .15, 25, height - 20);
+    cost += Math.abs(fx - goalX) * .5 + Math.abs(fy - goalY) * .35;
+    if (fx < 40 || fx > width - 40) cost += 25;
+    if (!best || cost < best.cost) best = {cost, dx, dy, focus: speed < 200};
+  }
+  return best;
+}
+
 function updatePlayer(dt) {
-  const dx = Number(keys.has('ArrowRight') || keys.has('KeyD')) - Number(keys.has('ArrowLeft') || keys.has('KeyA'));
-  const dy = Number(keys.has('ArrowDown') || keys.has('KeyS')) - Number(keys.has('ArrowUp') || keys.has('KeyW'));
+  let dx = Number(keys.has('ArrowRight') || keys.has('KeyD')) - Number(keys.has('ArrowLeft') || keys.has('KeyA'));
+  let dy = Number(keys.has('ArrowDown') || keys.has('KeyS')) - Number(keys.has('ArrowUp') || keys.has('KeyW'));
+  player.focus = keys.has('ShiftLeft') || keys.has('ShiftRight');
+  const auto = autoPilotOn();
+  if (auto) ({dx, dy, focus: player.focus} = autopilotMove());
   faceMotion(dx, dy);
-  const speed = (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 145 : 325) * dt / (Math.hypot(dx, dy) || 1);
+  const speed = (player.focus ? 145 : 325) * dt / (Math.hypot(dx, dy) || 1);
   player.x = clamp(player.x + dx * speed, 16, width - 16);
   player.y = clamp(player.y + dy * speed, 25, height - 20);
   player.invincible = Math.max(0, player.invincible - dt);
 
-  if ((touchMode || keys.has('KeyZ') || keys.has('Space')) && age >= nextShot) {
+  if ((auto || touchMode || keys.has('KeyZ') || keys.has('Space')) && age >= nextShot) {
     soundCue('shot');
     if (player.pilot === 'ember') {
       shots.push({ x:player.x, y:player.y-26, damage:4+power, radius:4+power*.6,
@@ -1782,7 +1857,9 @@ function updateBossHP(enemy) {
   bossHP.value = enemy.hp;
   const left = enemy.kind === 'mid' ? (enemy.phase === 2 ? enemy.sealLeft : null) : enemy.timer;
   const clock = left != null ? ' · ' + Math.ceil(left) + '秒' : '';
-  meterLabel.textContent = 'HP ' + Math.ceil(enemy.hp) + ' / ' + Math.ceil(enemy.maxHP) + clock;
+  const spell = enemy.kind === 'boss' || enemy.phase === 2;
+  meterLabel.textContent = (spell && !enemy.captureName ? '音譜 取得不可 · ' : '') +
+    'HP ' + Math.ceil(enemy.hp) + ' / ' + Math.ceil(enemy.maxHP) + clock;
 }
 
 function damageEnemy(enemy, amount) {
@@ -1877,6 +1954,7 @@ function takeHit() {
   player.hitPending = .15;
   soundCue('hit');
   burst(player.x, player.y, '#ffffff', 10);
+  if (autoBombOn() && canBomb()) useBomb();
 }
 function landHit() {
   for (const enemy of enemies) if (enemy.captureName) enemy.captureName = null;
@@ -1900,6 +1978,7 @@ function update(dt) {
   }
   age += dt;
   bombLeft = Math.max(0, bombLeft - dt);
+  if (autoBombOn()) for (const enemy of enemies) if (enemy.captureName) { enemy.captureName = null; updateBossHP(enemy); }
   if (player.hitPending > 0) {
     player.hitPending -= dt;
     if (player.hitPending <= 0) { player.hitPending = 0; landHit(); if (mode !== 'playing') return; }
@@ -2155,18 +2234,15 @@ function draw() {
 
   }
   drawBullets();
-  if (player.life > 0) {
-    const focus = keys.has('ShiftLeft') || keys.has('ShiftRight');
-    if (focus) {
-      ctx.save();
-      ctx.translate(player.x, player.y);
-      ctx.rotate(age * 2.2);
-      ctx.strokeStyle = '#ffffffb0'; ctx.lineWidth = 1.5;
-      ctx.setLineDash([6, 5]);
-      ctx.beginPath(); ctx.arc(0, 0, 15, 0, tau); ctx.stroke();
-      ctx.restore();
-    }
-    oval(player.x, player.y, player.radius + 2.5, player.radius + 2.5, player.hitPending > 0 ? '#ff3355' : '#c2182f');
+  if (player.life > 0 && player.focus) {
+    ctx.save();
+    ctx.translate(player.x, player.y);
+    ctx.rotate(age * 2.2);
+    ctx.strokeStyle = '#ffffffb0'; ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 5]);
+    ctx.beginPath(); ctx.arc(0, 0, 15, 0, tau); ctx.stroke();
+    ctx.restore();
+    oval(player.x, player.y, player.radius + 2, player.radius + 2, '#1a2440');
     oval(player.x, player.y, player.radius + .5, player.radius + .5, '#ffffff');
   }
   for (const spark of sparks) {
