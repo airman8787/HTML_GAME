@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#09181b">
-<title>潮目 / TIDELINE</title>
+<title>月蝕奏鳴曲 / ECLIPSE SONATA</title>
 <style>
 :root {
   color-scheme: dark;
@@ -86,12 +86,32 @@ body { background: radial-gradient(ellipse at 50% 20%, #29223b, #0b0e1b 72%); }
 .conversation #description { font-size:14px; color:#f3ecf6; }
 .conversation strong { display:inline-block; margin-top:5px; color:#8fe3d2; }
 .conversation strong + br ~ strong { color:#e4b5eb; }
+.roman-title { display:none; }
+.title-screen .card {
+  position:relative; isolation:isolate; border-color:#9f8565;
+  background:radial-gradient(ellipse at 50% 0%, #433149ed, #171323f5 48%, #101320fa);
+  box-shadow:inset 0 0 0 3px #151222, inset 0 0 0 4px #a88c6547, 0 14px 38px #04040bcc;
+}
+.title-screen .card::before {
+  content:""; position:absolute; z-index:-1; pointer-events:none;
+  top:12px; left:50%; transform:translateX(-50%);
+  width:clamp(50px,13vh,116px); aspect-ratio:1; border-radius:50%;
+  background:radial-gradient(circle at 57% 42%, #271e38 57%, #a26160 62%, #ffe1a3 67%, #b88169 70%);
+  box-shadow:0 0 18px #f2ab7555;
+}
+.title-screen #title-portrait { position:relative; filter:drop-shadow(0 3px 4px #120e20); }
+.title-screen #heading, header h1 { font-family:"Yu Mincho","Hiragino Mincho ProN","Noto Serif CJK JP",serif; }
+.title-screen #heading { color:#ffebc9; font-size:clamp(26px,5.5vw,43px); line-height:1.15; letter-spacing:.08em; text-shadow:0 2px #6b3b45; }
+.title-screen .roman-title { display:flex; align-items:center; justify-content:center; gap:9px; margin:5px auto 8px; color:#e6c39c; font:10px/1.4 Georgia,serif; letter-spacing:.24em; text-transform:uppercase; }
+.roman-title::before,.roman-title::after { content:""; width:24px; height:5px; border-block:1px solid #a38166; }
+.title-screen #action { color:#211526; background:linear-gradient(110deg,#c29879,#ffe6ac 58%,#d6ab84); border-color:#ffe1ad; letter-spacing:.25em; }
+@media(max-height:650px) { .title-screen .card::before { width:44px; top:7px; } }
 </style>
 </head>
 <body>
 <main>
   <header>
-    <h1>潮目 <span>TIDELINE</span></h1>
+    <h1>月蝕奏鳴曲 <span>ECLIPSE SONATA</span></h1>
     <button id="music" type="button" aria-pressed="true" aria-label="BGM切替">BGM ♪</button>
     <button id="pause" type="button" disabled aria-keyshortcuts="Escape P">一時停止</button>
   </header>
@@ -107,9 +127,10 @@ body { background: radial-gradient(ellipse at 50% 20%, #29223b, #0b0e1b 72%); }
     <div id="boss" class="boss" hidden><b id="boss-name">ボス</b> <b id="meter-label"></b><progress id="boss-hp" aria-label="ボスの耐久力" value="1" max="1"></progress></div>
     <output id="capture" role="status" hidden></output>
     <output id="extend-notice" role="status" hidden></output>
-    <section id="overlay" class="overlay" aria-labelledby="heading">
+    <section id="overlay" class="overlay title-screen" aria-labelledby="heading">
       <div class="card">
-        <h2 id="heading">潮目</h2>
+        <h2 id="heading">月蝕奏鳴曲</h2>
+        <span class="roman-title" lang="en">Eclipse Sonata</span>
         <p id="description">翡翠の星で火力アップ。月貨は500点。25,000点ごとにボムを1個補充。</p>
         <div id="pilot-picker">
           <label>自機 <select id="pilot"><option value="rabbit">月うさぎ</option><option value="ember">黒狐・朱音</option></select></label>
@@ -665,6 +686,7 @@ function updateHUD() {
 
 function setMode(next) {
   mode = next;
+  overlay.classList.remove('title-screen');
   overlay.classList.toggle('conversation', next === 'dialogue');
   document.querySelector('#folio').hidden = next === 'dialogue';
   resumeButton.hidden = true;
