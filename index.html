@@ -628,11 +628,47 @@ for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
 }
 
 function emit(enemy, angle, speed, form, turn = 0) {
-  bullets.push({ x: enemy.x, y: enemy.y + 13, angle, speed, form, turn, grazed: false });
+  const bullet = { x: enemy.x, y: enemy.y + 13, angle, speed, form, turn, grazed: false };
+  bullets.push(bullet);
+  return bullet;
 }
 
+// Radial expansion and angular sway share a phase across neighboring rays.
+// Radius always advances; the outline breathes without accumulating orbiting bullets.
+const petals = [
+  {lobes:4, depth:.24, sway:.16, rate:1.8},
+  {lobes:6, depth:.31, sway:.09, rate:2.2},
+  {lobes:3, depth:.27, sway:.27, rate:1.9},
+  {lobes:5, depth:.19, sway:.13, rate:2.4},
+  {lobes:2, depth:.34, sway:.32, rate:1.65}
+];
+function bloom(enemy, angle, speed, form, turn, phase) {
+  const bullet = emit(enemy, angle, speed, form, turn);
+  const shape = petals[chapterIndex];
+  bullet.path = {x:bullet.x, y:bullet.y, angle, time:0, shape,
+    phase:shape.lobes*angle + phase};
+}
 function ring(enemy, count, offset, speed, form, turn = 0) {
-  for (let i = 0; i < count; i++) emit(enemy, offset + i * tau / count, speed, form, turn);
+  for (let i = 0; i < count; i++) {
+    bloom(enemy, offset + i*tau/count, speed, form, turn, offset);
+  }
+}
+
+function advanceBullet(bullet, dt) {
+  const path = bullet.path;
+  if (path) {
+    path.time += dt;
+    const {time, shape, phase} = path;
+    const wave = phase + time*shape.rate;
+    const distance = bullet.speed*(time + shape.depth*(Math.sin(wave)-Math.sin(phase))/shape.rate);
+    bullet.angle = path.angle + bullet.turn*time + shape.sway*(Math.sin(wave)-Math.sin(phase));
+    bullet.x = path.x + distance*Math.cos(bullet.angle);
+    bullet.y = path.y + distance*Math.sin(bullet.angle);
+    return;
+  }
+  bullet.angle += bullet.turn * dt;
+  bullet.x += Math.cos(bullet.angle) * bullet.speed * dt;
+  bullet.y += Math.sin(bullet.angle) * bullet.speed * dt;
 }
 
 function volley(enemy) {
@@ -649,7 +685,7 @@ function volley(enemy) {
     enemy.cooldown = .67 - .07 * rank;
   } else if (enemy.kind === 'boss') {
     const phase = enemy.phase;
-    const rays = 11 + rank * 4;
+    const rays = densities[rank].rays;
     if (phase === 1) {
       ring(enemy, rays, n * .21, 122, 'seed', .17);
     } else if (phase === 2) {
@@ -683,18 +719,18 @@ function volley(enemy) {
     enemy.cooldown = .84 - .075 * rank - .074 * phase;
   } else {
     const style = spirits[enemy.kind];
-    const count = 2 + rank * 2;
+    const count = densities[rank].fan;
     for (let i = 0; i < count; i++) {
       emit(enemy, aim + (i - (count-1)/2) * .18, style.speed * 1.08, style.form);
     }
-    enemy.cooldown = style.interval * .83 - .12 * rank;
+    enemy.cooldown = style.interval * densities[rank].cooldown - .12 * rank;
   }
 }
 
 function chapterVolley(enemy, aim, n) {
   const mid = enemy.kind === 'mid';
   const phase = mid ? 1 : enemy.phase;
-  const rays = 8 + rank * 3 + phase;
+  const rays = densities[rank].rays - 4 + phase;
   const form = mid ? 'note' : ['','seed','star','pearl','moon'][chapterIndex];
   switch (chapterIndex) {
     case 1: // Twin facets split apart around the stream.
@@ -704,7 +740,7 @@ function chapterVolley(enemy, aim, n) {
       break;
     case 2: // Rotating fans leave a corridor between their leaves.
       for (let fan=0; fan<3; fan++) {
-        for (let i=0; i<4+rank+phase; i++) emit(enemy, fan*tau/3+n*.21+i*.10, 116+i*5, form, .16);
+        for (let i=0; i<4+rank+phase; i++) bloom(enemy, fan*tau/3+n*.21+i*.10, 116+i*5, form, .16, n*.3);
       }
       break;
     case 3: // Staggered chimes fall from above with a moving opening.
@@ -739,19 +775,23 @@ const spirits = {
   turtle:   { size: 56, hp: 9, form: 'moon',  speed: 100, interval: 3.9 },
   umbrella: { size: 47, hp: 5, form: 'star',  speed: 131, interval: 3.2 }
 };
-const waveInterval = 3.45;
-const approachWaves = 16;
+const densities = [
+  {interval:4.2, before:13, after:16, extra:-1, spacing:.36, fan:2, cooldown:1.04, rays:8},
+  {interval:3.45, before:16, after:20, extra:5, spacing:.29, fan:4, cooldown:.83, rays:15},
+  {interval:2.95, before:19, after:23, extra:8, spacing:.24, fan:6, cooldown:.78, rays:22},
+  {interval:2.55, before:22, after:27, extra:12, spacing:.20, fan:8, cooldown:.73, rays:29}
+];
 const convoys = ['fox','crane','moth','turtle','umbrella','crane','fox','umbrella','moth','turtle'];
 
 function spawnWave(index) {
   const local = chapterIndex > 0 && index % 3 !== 1;
   const kind = local ? 'mob' + (chapterIndex + 1) : convoys[(index + chapterIndex * 2) % convoys.length];
   const side = index % 2 ? 1 : -1;
-  const count = (kind === 'turtle' ? 4 : 6) + index % 3 + [2, 5, 6, 7][rank];
+  const count = (kind === 'turtle' ? 4 : 6) + index % 3 + densities[rank].extra;
   for (let i = 0; i < count; i++) {
     enemies.push({
       kind, side, baseX: 130 + (index * 79) % 230, x: -100, y: -90,
-      age: -i * .29, radius: spirits[kind].size * .3,
+      age: -i * densities[rank].spacing, radius: spirits[kind].size * .3,
       hp: spirits[kind].hp, volley: 0, cooldown: .55 + i % 3 * .16
     });
   }
@@ -942,9 +982,7 @@ function awardShower(enemy, final) {
 
 function updateHazards(dt) {
   for (const bullet of bullets) {
-    bullet.angle += bullet.turn * dt;
-    bullet.x += Math.cos(bullet.angle) * bullet.speed * dt;
-    bullet.y += Math.sin(bullet.angle) * bullet.speed * dt;
+    advanceBullet(bullet, dt);
     const radius = forms[bullet.form].radius;
     const distance = Math.hypot(bullet.x - player.x, bullet.y - player.y);
     if (player.invincible > 0) continue;
@@ -991,7 +1029,8 @@ function update(dt) {
   if (stage === 'approach' || stage === 'beacon') {
     routeTime += dt;
     scenery += dt;
-    const waves = stage === 'approach' ? approachWaves : 20;
+    const {interval:waveInterval, before:approachWaves, after} = densities[rank];
+    const waves = stage === 'approach' ? approachWaves : after;
     if (nextWave < waves && routeTime >= .45 + nextWave * waveInterval) {
       spawnWave(nextWave + (stage === 'beacon' ? approachWaves : 0));
       nextWave++;
