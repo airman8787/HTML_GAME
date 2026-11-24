@@ -75,6 +75,11 @@ body { background: radial-gradient(ellipse at 50% 20%, #29223b, #0b0e1b 72%); }
 #extend-notice { position:absolute; top:12%; left:50%; transform:translateX(-50%); background:#181529eb; border:1px solid #f5cf81; padding:5px 16px; border-radius:4px; color:#ffe7a7; pointer-events:none; }
 #loadout { text-align:left; font-size:12px; margin:4px 0 10px; }
 .card { max-height:100%; overflow:auto; }
+#folio { margin-top:10px; text-align:left; font-size:13px; }
+#folio summary { cursor:pointer; color:#ffe7a7; }
+#folio-list { line-height:1.6; }
+#capture { position:absolute; bottom:12%; width:100%; text-align:center; color:#ffe7a7; text-shadow:0 1px 4px #000; pointer-events:none; }
+#resume { margin-top:6px; }
 </style>
 </head>
 <body>
@@ -94,6 +99,7 @@ body { background: radial-gradient(ellipse at 50% 20%, #29223b, #0b0e1b 72%); }
   <div class="field">
     <canvas id="game" width="520" height="720" aria-label="縦スクロールシューティングのプレイ画面"></canvas>
     <div id="boss" class="boss" hidden><b id="boss-name">ボス</b> <b id="meter-label"></b><progress id="boss-hp" aria-label="ボスの耐久力" value="1" max="1"></progress></div>
+    <output id="capture" role="status" hidden></output>
     <output id="extend-notice" role="status" hidden></output>
     <section id="overlay" class="overlay" aria-labelledby="heading">
       <div class="card">
@@ -108,6 +114,9 @@ body { background: radial-gradient(ellipse at 50% 20%, #29223b, #0b0e1b 72%); }
           <option value="2">上級</option><option value="3">極夜</option>
         </select></label>
         <button id="action" type="button">出撃</button>
+        <button id="resume" type="button" hidden></button>
+        <details id="folio"><summary></summary><p>音譜を被弾せず突破すると収録。ボムも使えます。</p><div id="folio-list"></div></details>
+        <small id="save-error" role="status" hidden>このブラウザでは記録を保存できません。</small>
       </div>
     </section>
   </div>
@@ -460,6 +469,70 @@ let nextExtendScore, extendTime;
 const bombDuration = 1.6;
 let bombX, bombs, bombLeft, nextBombScore, dropIndex, powerSlot;
 
+const savePrefix = 'tideline.v1.';
+const resumeButton = document.querySelector('#resume');
+const captureNotice = document.querySelector('#capture');
+let captureTime = 0;
+function saved(key, value) {
+  try {
+    if (value === undefined) return JSON.parse(localStorage.getItem(savePrefix + key));
+    if (value === null) localStorage.removeItem(savePrefix + key);
+    else localStorage.setItem(savePrefix + key, JSON.stringify(value));
+  } catch {
+    document.querySelector('#save-error').hidden = false;
+  }
+}
+const collected = new Set(chapters.flatMap(c => c.spells).filter(name => saved(name) === true));
+function renderFolio() {
+  document.querySelector('#folio summary').textContent = '音譜帳　' + collected.size + ' / ' + chapters.reduce((n,c) => n + c.spells.length, 0);
+  const list = document.querySelector('#folio-list');
+  list.replaceChildren();
+  for (const [i,c] of chapters.entries()) {
+    const row = document.createElement('p');
+    const names = c.spells.filter(name => collected.has(name));
+    row.textContent = '第' + (i+1) + '面　' + c.title + '（' + names.length + '/5）　' + names.join('、');
+    list.append(row);
+  }
+}
+function finishSpell(enemy) {
+  const name = enemy.captureName;
+  enemy.captureName = null;
+  if (!name || collected.has(name)) return;
+  collected.add(name);
+  saved(name, true);
+  renderFolio();
+  captureNotice.textContent = '音譜獲得　' + name;
+  captureNotice.hidden = false;
+  captureTime = 3;
+}
+
+let checkpoint = saved('checkpoint');
+function validCheckpoint(c) {
+  return c && Number.isInteger(c.index) && c.index > 0 && c.index < chapters.length &&
+    Object.hasOwn(loadouts, c.pilot) && Number.isInteger(c.rank) && c.rank >= 0 && c.rank < 4 &&
+    ['life','power','score','graze','bombs','dropIndex','powerSlot'].every(k => Number.isSafeInteger(c[k]) && c[k] >= 0) &&
+    c.life > 0 && c.power <= maxPower && c.dropIndex < 10 && c.powerSlot < 10;
+}
+if (validCheckpoint(checkpoint)) {
+  resumeButton.hidden = false;
+  resumeButton.textContent = '第' + (checkpoint.index+1) + '面から再開';
+}
+resumeButton.addEventListener('click', () => {
+  const c = checkpoint;
+  if (!validCheckpoint(c)) return;
+  pilotSelect.value = c.pilot;
+  rankSelect.value = c.rank;
+  previewPilot();
+  reset();
+  player.life = c.life;
+  ({power, score, graze, bombs, dropIndex, powerSlot} = c);
+  nextBombScore = (Math.floor(score / bombInterval) + 1) * bombInterval;
+  nextExtendScore = (Math.floor(score / extendInterval) + 1) * extendInterval;
+  enterChapter(c.index);
+  setMode('playing');
+});
+renderFolio();
+
 function nextDrop() {
   if (dropIndex === 0) powerSlot = Math.floor(Math.random() * 10);
   const kind = dropIndex === powerSlot ? 'power' : 'coin';
@@ -492,6 +565,7 @@ bombButton.addEventListener('click', () => { useBomb(); bombButton.blur(); });
 
 function reset() {
   rank = Number(rankSelect.value);
+  captureNotice.hidden = true; captureTime = 0;
   step = 0;
   nextExtendScore = extendInterval; extendTime = 0; extendNotice.hidden = true;
   bombs = 2; bombLeft = dropIndex = 0; nextBombScore = bombInterval;
@@ -548,6 +622,16 @@ function updateHUD() {
 
 function setMode(next) {
   mode = next;
+  resumeButton.hidden = true;
+  document.querySelector('#folio').open = false;
+  if (next === 'intermission') {
+    checkpoint = {index:chapterIndex+1, pilot:player.pilot, rank, life:player.life,
+      power, score, graze, bombs, dropIndex, powerSlot:powerSlot ?? 0};
+    saved('checkpoint', checkpoint);
+  } else if (next === 'clear' || next === 'over') {
+    checkpoint = null;
+    saved('checkpoint', null);
+  }
   const picking = next === 'over' || next === 'clear';
   document.querySelector('#rank-label').hidden = !picking;
   document.querySelector('#pilot-picker').hidden = !picking;
@@ -579,7 +663,11 @@ function togglePause() {
 
 action.addEventListener('click', () => {
   if (mode === 'intermission') enterChapter(chapterIndex + 1);
-  else if (mode !== 'paused') reset();
+  else if (mode !== 'paused') {
+    checkpoint = null;
+    saved('checkpoint', null);
+    reset();
+  }
   setMode('playing');
 });
 pause.addEventListener('click', togglePause);
@@ -843,6 +931,7 @@ function followConvoy(enemy) {
 }
 
 function announce(enemy, spell) {
+  enemy.captureName = chapter.spells[spell];
   warning = { spell, left: 1.9 };
   bullets = [];
   shots = [];
@@ -946,6 +1035,7 @@ function damageEnemy(enemy, amount) {
     enemy.sealLeft = sealDuration;
     announce(enemy, 0);
   } else if (final && enemy.phase < 4 && enemy.hp <= enemy.maxHP * (1 - enemy.phase / 4)) {
+    finishSpell(enemy);
     enemy.phase++;
     announce(enemy, enemy.phase);
   }
@@ -979,6 +1069,7 @@ function updateShots(dt) {
 }
 
 function awardShower(enemy, final) {
+  finishSpell(enemy);
   stage = final ? 'finalReward' : 'midReward';
   rewardTime = 0;
   bossPanel.hidden = true;
@@ -1018,6 +1109,7 @@ function updateHazards(dt) {
 }
 
 function takeHit() {
+  for (const enemy of enemies) if (enemy.captureName) enemy.captureName = null;
   player.life--;
   player.invincible = 1.65;
   bullets = bullets.filter(bullet => Math.hypot(bullet.x - player.x, bullet.y - player.y) > 125);
@@ -1027,6 +1119,10 @@ function takeHit() {
 }
 
 function update(dt) {
+  if (captureTime > 0) {
+    captureTime = Math.max(0, captureTime - dt);
+    if (!captureTime) captureNotice.hidden = true;
+  }
   if (extendTime > 0) {
     extendTime = Math.max(0, extendTime - dt);
     if (!extendTime) extendNotice.hidden = true;
