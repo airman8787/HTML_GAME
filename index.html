@@ -674,6 +674,7 @@ function advanceBullet(bullet, dt) {
 function volley(enemy) {
   const aim = Math.atan2(player.y - enemy.y - 13, player.x - enemy.x);
   const n = enemy.volley++;
+  const firstBullet = bullets.length;
   if (chapterIndex && (enemy.kind === 'boss' || (enemy.kind === 'mid' && enemy.phase === 2))) {
     chapterVolley(enemy, aim, n);
   } else if (enemy.kind === 'mid' && enemy.phase === 1) {
@@ -719,11 +720,22 @@ function volley(enemy) {
     enemy.cooldown = .84 - .075 * rank - .074 * phase;
   } else {
     const style = spirits[enemy.kind];
-    const count = densities[rank].fan;
+    const {fan, shotStride} = densities[rank];
+    const count = fan / shotStride;
     for (let i = 0; i < count; i++) {
-      emit(enemy, aim + (i - (count-1)/2) * .18, style.speed * 1.08, style.form);
+      emit(enemy, aim + (i - (count-1)/2) * .18 * (fan-1)/(count-1), style.speed * 1.08, style.form);
     }
     enemy.cooldown = style.interval * densities[rank].cooldown - .12 * rank;
+    return;
+  }
+
+  // Keep alternating rays of each boss pattern while preserving its firing rhythm.
+  if (densities[rank].shotStride === 2) {
+    let kept = firstBullet;
+    for (let i = firstBullet + n % 2; i < bullets.length; i += 2) {
+      bullets[kept++] = bullets[i];
+    }
+    bullets.length = kept;
   }
 }
 
@@ -776,10 +788,10 @@ const spirits = {
   umbrella: { size: 47, hp: 5, form: 'star',  speed: 131, interval: 3.2 }
 };
 const densities = [
-  {interval:4.2, before:13, after:16, extra:-1, spacing:.36, fan:2, cooldown:1.04, rays:8},
-  {interval:3.45, before:16, after:20, extra:5, spacing:.29, fan:4, cooldown:.83, rays:15},
-  {interval:2.95, before:19, after:23, extra:8, spacing:.24, fan:6, cooldown:.78, rays:22},
-  {interval:2.55, before:22, after:27, extra:12, spacing:.20, fan:8, cooldown:.73, rays:29}
+  {interval:4.2, before:13, after:16, extra:-1, spacing:.36, fan:2, shotStride:1, cooldown:1.04, rays:8},
+  {interval:3.45, before:16, after:20, extra:5, spacing:.29, fan:4, shotStride:2, cooldown:.83, rays:15},
+  {interval:2.95, before:19, after:23, extra:8, spacing:.24, fan:6, shotStride:2, cooldown:.78, rays:22},
+  {interval:2.55, before:22, after:27, extra:12, spacing:.20, fan:8, shotStride:1, cooldown:.73, rays:29}
 ];
 const convoys = ['fox','crane','moth','turtle','umbrella','crane','fox','umbrella','moth','turtle'];
 
