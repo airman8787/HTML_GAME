@@ -203,7 +203,7 @@ let mode = 'title';
 let player, enemies, bullets, shots, sparks;
 const pilotSelect = document.querySelector('#pilot');
 const loadouts = {
-  rabbit: { name:'月うさぎ', portrait:'rabbit', info:'拡散型。星猫が増え、扇状に援護射撃。ボム「月波」は画面全体を均等に攻撃。' },
+  rabbit: { name:'月うさぎ', portrait:'rabbit', info:'拡散型。被弾判定は自機中央の白点だけ。星猫が増え、扇状に援護射撃。ボム「月波」は画面全体を均等に攻撃。' },
   ember: { name:'黒狐・朱音', portrait:'ember_south', info:'集中型。音叉から正面に貫通弾。星で威力・太さ・貫通数が上昇。ボム「陽炎柱」は自機の縦列に大ダメージ。' }
 };
 function previewPilot() {
@@ -642,20 +642,29 @@ function volley(enemy) {
     chapterVolley(enemy, aim, n);
   } else if (enemy.kind === 'mid' && enemy.phase === 1) {
     for (let i = -2-rank; i <= 2+rank; i++) emit(enemy, aim + i * .17, 135, 'pearl');
-    enemy.cooldown = 1.05 - rank * .09;
+    enemy.cooldown = .96 - rank * .09;
   } else if (enemy.kind === 'mid') {
     ring(enemy, 9 + rank * 3, n * .18, 106, 'note', .14);
     if (n % 2 === 0) ring(enemy, 4 + rank * 2, aim, 145, 'star');
-    enemy.cooldown = .72 - .07 * rank;
+    enemy.cooldown = .67 - .07 * rank;
   } else if (enemy.kind === 'boss') {
     const phase = enemy.phase;
     const rays = 11 + rank * 4;
     if (phase === 1) {
       ring(enemy, rays, n * .21, 122, 'seed', .17);
     } else if (phase === 2) {
-      for (const side of [-1, 1]) {
-        const lantern = { x: enemy.x + 50 * side, y: enemy.y };
-        ring(lantern, rays - 2, side * n * .15, 112, 'pearl', side * .22);
+      // Both fans leave the same opening when their row reaches the lower field.
+      const opening = width/2 + 96*Math.sin(n*.28);
+      const lanes = 6 + rank*2;
+      for (const side of [-1,1]) {
+        const lantern = {x:enemy.x + side*50, y:enemy.y};
+        const edge = side < 0 ? -24 : width+24;
+        const inner = opening + side*(42-rank*3);
+        for (let i=0; i<lanes; i++) {
+          const target = inner + (edge-inner)*i/(lanes-1);
+          const dx = target-lantern.x, dy = height-90-lantern.y-13;
+          emit(lantern, Math.atan2(dy,dx), Math.hypot(dx,dy)/3.1, 'pearl');
+        }
       }
     } else if (phase === 3) {
       for (let i = 0; i < rays; i++) {
@@ -668,16 +677,17 @@ function volley(enemy) {
       ring(enemy, rays + 4, n * .19, 142, 'seed', .19);
       ring(enemy, rays - 3, -n * .17, 112, 'pearl', -.17);
     }
-    if (n % 3 === 0) {
+    if (phase !== 2 && n % 3 === 0) {
       for (let i = -rank-1; i <= rank+1; i++) emit(enemy, aim + i * .16, 159, 'moon');
     }
     enemy.cooldown = .84 - .075 * rank - .074 * phase;
   } else {
     const style = spirits[enemy.kind];
-    for (let i = -rank; i <= rank; i++) {
-      emit(enemy, aim + i * .23, style.speed, style.form);
+    const count = 2 + rank * 2;
+    for (let i = 0; i < count; i++) {
+      emit(enemy, aim + (i - (count-1)/2) * .18, style.speed * 1.08, style.form);
     }
-    enemy.cooldown = style.interval - .12 * rank;
+    enemy.cooldown = style.interval * .83 - .12 * rank;
   }
 }
 
@@ -715,7 +725,7 @@ function chapterVolley(enemy, aim, n) {
     for (let i=-rank-1; i<=rank+1; i++) emit(enemy,aim+i*.17,156,'pearl');
   }
   if (phase >= 3 && n%3 === 1) ring(enemy,rays,aim,138,'star',-.12);
-  enemy.cooldown = .98 - .065*rank - .08*phase;
+  enemy.cooldown = (mid ? .90 : .98) - .065*rank - .08*phase;
 }
 
 const spirits = {
@@ -729,25 +739,27 @@ const spirits = {
   turtle:   { size: 56, hp: 9, form: 'moon',  speed: 100, interval: 3.9 },
   umbrella: { size: 47, hp: 5, form: 'star',  speed: 131, interval: 3.2 }
 };
+const waveInterval = 3.45;
+const approachWaves = 16;
 const convoys = ['fox','crane','moth','turtle','umbrella','crane','fox','umbrella','moth','turtle'];
 
 function spawnWave(index) {
   const local = chapterIndex > 0 && index % 3 !== 1;
   const kind = local ? 'mob' + (chapterIndex + 1) : convoys[(index + chapterIndex * 2) % convoys.length];
   const side = index % 2 ? 1 : -1;
-  const count = (kind === 'turtle' ? 4 : 6) + index % 3 + [1, 3, 4, 5][rank];
+  const count = (kind === 'turtle' ? 4 : 6) + index % 3 + [2, 5, 6, 7][rank];
   for (let i = 0; i < count; i++) {
     enemies.push({
       kind, side, baseX: 130 + (index * 79) % 230, x: -100, y: -90,
-      age: -i * .38, radius: spirits[kind].size * .3,
-      hp: spirits[kind].hp, volley: 0, cooldown: .95 + i % 3 * .27
+      age: -i * .29, radius: spirits[kind].size * .3,
+      hp: spirits[kind].hp, volley: 0, cooldown: .55 + i % 3 * .16
     });
   }
 }
 
 // Delayed followers sample the same path as their leader.
 function followConvoy(enemy) {
-  const t = enemy.age, side = enemy.side;
+  const t = enemy.age * 1.24, side = enemy.side;
   if (enemy.kind === 'mob2') {
     enemy.x = enemy.baseX + side * 72 * Math.sin(2*t);
     enemy.y = -35 + t*94 + 22*Math.sin(3*t);
@@ -789,7 +801,7 @@ function announce(enemy, spell) {
 
 function spawnBoss(final) {
   stage = final ? 'final' : 'crossing';
-  const hp = final ? 1500 + 450 * rank + chapterIndex * 150 : 360 + 60 * rank + chapterIndex * 40;
+  const hp = final ? 1500 + 450 * rank + chapterIndex * 150 : 410 + 70 * rank + chapterIndex * 45;
   const enemy = {
     kind: final ? 'boss' : 'mid', x: width / 2, y: 114, radius: final ? 34 : 28,
     hp, maxHP: hp, volley: 0, age: 0, phase: 1
@@ -911,7 +923,7 @@ function updateShots(dt) {
     if (warning || stage.endsWith('Reward')) break;
   }
   shots = shots.filter(shot => shot.y > -20);
-  enemies = enemies.filter(enemy => enemy.hp > 0 && enemy.y < height + 35 && (enemy.kind !== 'crane' || enemy.age < 5));
+  enemies = enemies.filter(enemy => enemy.hp > 0 && enemy.y < height + 35 && (enemy.kind !== 'crane' || enemy.age * 1.24 < 5));
 }
 
 function awardShower(enemy, final) {
@@ -979,12 +991,12 @@ function update(dt) {
   if (stage === 'approach' || stage === 'beacon') {
     routeTime += dt;
     scenery += dt;
-    const waves = stage === 'approach' ? 13 : 17;
-    if (nextWave < waves && routeTime >= 1 + nextWave * 4.8) {
-      spawnWave(nextWave + (stage === 'beacon' ? 13 : 0));
+    const waves = stage === 'approach' ? approachWaves : 20;
+    if (nextWave < waves && routeTime >= .45 + nextWave * waveInterval) {
+      spawnWave(nextWave + (stage === 'beacon' ? approachWaves : 0));
       nextWave++;
     }
-    if (routeTime >= waves * 4.8 + 8) {
+    if (routeTime >= waves * waveInterval + 5) {
       spawnBoss(stage === 'beacon');
       return;
     }
@@ -1166,11 +1178,7 @@ function draw() {
     if (player.flip) ctx.scale(-1, 1);
     drawCharacter(player.pilot === 'ember' ? 'ember_' + player.facing : player.facing, 0, 0, 65);
     ctx.restore();
-    oval(player.x, player.y, player.radius + 2, player.radius + 2, '#18334b');
-    ctx.fillStyle = '#f5fff8';
-    ctx.beginPath();
-    ctx.arc(player.x, player.y, player.radius, 0, tau);
-    ctx.fill();
+
   }
   for (const bullet of bullets) {
     const {radius,color} = forms[bullet.form];
@@ -1187,6 +1195,10 @@ function draw() {
       polygon(points,color);
     } else oval(bullet.x,bullet.y,radius+1,radius+1,color);
     oval(bullet.x,bullet.y,radius*.52,radius*.52,'#fff5e0');
+  }
+  if (player.life > 0) {
+    oval(player.x, player.y, player.radius + 2, player.radius + 2, '#18334b');
+    oval(player.x, player.y, player.radius, player.radius, '#f5fff8');
   }
   for (const spark of sparks) {
     ctx.globalAlpha = spark.time * 2;
