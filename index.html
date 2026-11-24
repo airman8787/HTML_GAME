@@ -131,7 +131,7 @@ body { background: radial-gradient(ellipse at 50% 20%, #29223b, #0b0e1b 72%); }
       <div class="card">
         <h2 id="heading">月蝕奏鳴曲</h2>
         <span class="roman-title" lang="en">Eclipse Sonata</span>
-        <p id="description">翡翠の星で火力アップ。月貨は500点。25,000点ごとにボムを1個補充。</p>
+        <p id="description">翡翠の星で火力アップ。月貨は500点。80,000点ごとにボム＋1、被弾するとボムは3個まで回復。画面上部に上がると全アイテムを回収。</p>
         <div id="pilot-picker">
           <label>自機 <select id="pilot"><option value="rabbit">月うさぎ</option><option value="ember">黒狐・朱音</option></select></label>
           <p id="loadout"></p>
@@ -149,7 +149,7 @@ body { background: radial-gradient(ellipse at 50% 20%, #29223b, #0b0e1b 72%); }
   </div>
   <footer>
     <button type="button" id="bomb" disabled>ボム 2</button>
-    <span id="key-help">矢印 / WASD 移動 · Z / Space 射撃 · Shift 低速 · X ボム</span>
+    <span id="key-help">矢印 / WASD 移動 · Z / Space 射撃 · Shift 低速（判定表示） · X ボム（被弾直後でも有効）</span>
     <span id="touch-help">ドラッグで移動 · 射撃は自動</span>
   </footer>
 </main>
@@ -301,202 +301,556 @@ const exchanges = {
 };
 let hiddenBoss = false, queenBombed = false;
 let chapter = chapters[0], chapterIndex = 0;
+// Hit radii are deliberately smaller than the drawn sprites, as is customary in danmaku.
 const forms = {
-  note: { radius: 5, color: '#ffe4aa' },
-  pearl: { radius: 4, color: '#ff9ec3' },
-  seed: { radius: 3, color: '#a5bcff' },
-  star: { radius: 6, color: '#ffd47c' },
-  moon: { radius: 10, color: '#fb8fb0' }
+  orb:   { hit: 2.6, r: 6 },
+  ball:  { hit: 4.6, r: 10 },
+  big:   { hit: 10,  r: 20 },
+  rice:  { hit: 2.4, r: 8,  dir: true },
+  kunai: { hit: 2.4, r: 9,  dir: true },
+  petal: { hit: 2.8, r: 9,  dir: true },
+  star:  { hit: 3.6, r: 9,  spin: true },
+  note:  { hit: 3.6, r: 10 }
 };
+const hues = {
+  red:'#ff3d5e', orange:'#ff8c2e', gold:'#ffd84a', green:'#52f59c', cyan:'#3fe6ff',
+  blue:'#5b7dff', purple:'#b65cff', pink:'#ff6fd8', white:'#cfe0ff'
+};
+const spriteCache = new Map();
+function bulletSprite(form, color) {
+  const key = form + color;
+  if (spriteCache.has(key)) return spriteCache.get(key);
+  const {r} = forms[form], pad = 5, half = r + pad;
+  const sheet = document.createElement('canvas');
+  sheet.width = sheet.height = half * 4;
+  const g = sheet.getContext('2d');
+  g.scale(2, 2); g.translate(half, half);
+  const hue = hues[color];
+  const glow = g.createRadialGradient(0, 0, r * .4, 0, 0, r + pad);
+  glow.addColorStop(0, hue + 'aa'); glow.addColorStop(1, hue + '00');
+  const shape = (scale, fill) => {
+    g.fillStyle = fill; g.beginPath();
+    const s = r * scale;
+    if (form === 'rice') g.ellipse(0, 0, s, s * .48, 0, 0, tau);
+    else if (form === 'kunai') {
+      g.moveTo(s, 0); g.lineTo(s * .05, s * .44); g.lineTo(-s, s * .26);
+      g.lineTo(-s * .72, 0); g.lineTo(-s, -s * .26); g.lineTo(s * .05, -s * .44);
+    } else if (form === 'petal') {
+      g.moveTo(s, 0); g.quadraticCurveTo(0, s * .8, -s, 0); g.quadraticCurveTo(0, -s * .8, s, 0);
+    } else if (form === 'star') {
+      for (let i = 0; i < 10; i++) {
+        const a = i * tau / 10 - Math.PI / 2, d = i % 2 ? s * .46 : s;
+        g.lineTo(Math.cos(a) * d, Math.sin(a) * d);
+      }
+    } else if (form === 'note') {
+      g.ellipse(-s * .15, s * .3, s * .5, s * .38, -.4, 0, tau);
+      g.rect(s * .22, -s * .85, s * .16, s * 1.15);
+    } else g.arc(0, 0, s, 0, tau);
+    g.closePath(); g.fill();
+  };
+  g.fillStyle = glow; g.beginPath(); g.arc(0, 0, r + pad, 0, tau); g.fill();
+  shape(1, hue);
+  shape(form === 'big' ? .7 : .58, '#ffffffee');
+  if (form === 'big') { g.strokeStyle = '#ffffff88'; g.lineWidth = 1.5; g.beginPath(); g.arc(0, 0, r - 1, 0, tau); g.stroke(); }
+  if (form === 'note') { g.fillStyle = hue; g.fillRect(r * .22, -r * .85, r * .55, r * .2); }
+  spriteCache.set(key, sheet);
+  return sheet;
+}
+
 let scrollTime = 0;
 let pointer = null;
 let touchMode = false;
 
 const musicButton = document.querySelector('#music');
 let musicEnabled = true;
-let audio, master, echo, noise, musicTimer, nextBeat, step = 0;
+let audio, master, revIn, dlyIn, dlyTaps, noise, musicTimer, nextStep = 0, step = 0;
+const waves = {};
 const midiHz = note => 440 * 2 ** ((note - 69) / 12);
 
-function instrument(time, duration, frequency, voice, volume, attack = .008, endFrequency) {
-  const tone = audio.createOscillator(), gain = audio.createGain();
-  tone.type = voice;
-  tone.frequency.setValueAtTime(frequency, time);
-  if (endFrequency) tone.frequency.exponentialRampToValueAtTime(endFrequency, time + duration);
-  gain.gain.setValueAtTime(.0001, time);
-  gain.gain.exponentialRampToValueAtTime(volume, time + attack);
-  gain.gain.exponentialRampToValueAtTime(.0001, time + duration);
-  tone.connect(gain).connect(master);
-  if (voice === 'triangle') gain.connect(echo);
-  tone.start(time); tone.stop(time + duration);
+// ---- Score notation -------------------------------------------------------
+// Melody tokens are NOTE[:sixteenths]; durations are sticky, "r" rests,
+// "-" extends the previous note and "|" checks a bar line.
+const pitchClass = {C:0, D:2, E:4, F:5, G:7, A:9, B:11};
+const accidental = s => s === '#' ? 1 : s === 'b' ? -1 : 0;
+function noteMidi(name) {
+  const m = /^([A-G])([#b]?)(-?\d)$/.exec(name);
+  return 12 * (Number(m[3]) + 1) + pitchClass[m[1]] + accidental(m[2]);
 }
-
-function percussion(time, snare) {
-  const source = audio.createBufferSource(), filter = audio.createBiquadFilter(), gain = audio.createGain();
-  source.buffer = noise;
-  filter.type = 'highpass'; filter.frequency.value = snare ? 1600 : 7000;
-  const length = snare ? .14 : .055;
-  gain.gain.setValueAtTime(snare ? .17 : .075, time);
-  gain.gain.exponentialRampToValueAtTime(.0001, time + length);
-  source.connect(filter).connect(gain).connect(master);
-  source.start(time); source.stop(time + length);
-}
-
-// Wide, slowly opening pad and a brighter singing lead share a stereo hall return.
-let hall;
-function silk(time, duration, note, lead) {
-  const filter = audio.createBiquadFilter();
-  filter.type = 'lowpass';
-  filter.Q.value = .8;
-  filter.frequency.setValueAtTime(lead ? 1300 : 500, time);
-  filter.frequency.exponentialRampToValueAtTime(lead ? 4800 : 2200, time + duration * .38);
-  filter.frequency.exponentialRampToValueAtTime(900, time + duration);
-  const envelope = audio.createGain();
-  envelope.gain.setValueAtTime(.0001, time);
-  envelope.gain.exponentialRampToValueAtTime(lead ? .105 : .047, time + (lead ? .035 : .22));
-  envelope.gain.exponentialRampToValueAtTime(.0001, time + duration);
-  filter.connect(envelope).connect(master);
-  envelope.connect(hall);
-  for (const side of [-1,1]) {
-    const osc = audio.createOscillator(), pan = audio.createStereoPanner();
-    osc.type = 'sawtooth'; osc.frequency.value = midiHz(note);
-    osc.detune.value = side * (lead ? 5 : 9);
-    pan.pan.value = side * .68;
-    osc.connect(pan).connect(filter);
-    osc.start(time); osc.stop(time + duration);
-  }
-}
-// Scale degrees are relative to the tonic. A dot leaves a rest in the phrase.
-const scales = {
-  minor: [0,2,3,5,7,8,10], dorian: [0,2,3,5,7,9,10],
-  major: [0,2,4,5,7,9,11], harmonic: [0,2,3,5,7,8,11], lydian: [0,2,4,6,7,9,11]
+const qualities = {
+  '':[0,4,7], m:[0,3,7], '7':[0,4,7,10], m7:[0,3,7,10], maj7:[0,4,7,11],
+  dim:[0,3,6], m7b5:[0,3,6,10], sus4:[0,5,7], add9:[0,4,7,14]
 };
-function scoreTrack(title,bpm,tonic,scale,voice,roots,phrases,kick,snare) {
-  return {title,bpm,tonic,scale:scales[scale],voice,roots,
-    phrases:phrases.map(line=>line.split(' ').map(n=>n==='.'?null:Number(n))),kick,snare};
+function parseChord(name) {
+  const m = /^([A-G])([#b]?)(.*)$/.exec(name);
+  const root = (pitchClass[m[1]] + accidental(m[2]) + 12) % 12;
+  const shape = qualities[m[3]];
+  return {root, fifth:shape[2], tones:shape.map(i => (root + i) % 12)};
 }
+function compose(title, bpm, chords, melody, arrangement) {
+  const bars = chords.split('|').map(bar => bar.trim().split(',').map(parseChord));
+  const line = new Array(bars.length * 16).fill(null);
+  let pos = 0, len = 4, last = null;
+  for (const token of melody.trim().split(/\s+/)) {
+    if (token === '|') {
+      if (pos % 16) console.warn(title, 'bar line at', pos);
+      continue;
+    }
+    const [name, d] = token.split(':');
+    if (d) len = Number(d);
+    if (name === '-') { if (last) last.len += len; }
+    else if (name === 'r') last = null;
+    else { last = {midi:noteMidi(name) + 12 * (arrangement.oct || 0), len}; line[pos] = last; }
+    pos += len;
+  }
+  if (pos !== line.length) console.warn(title, 'melody length', pos, line.length);
+  return {title, bpm, bars, line, ...arrangement};
+}
+
+// ---- Instruments ----------------------------------------------------------
+function route(node, {pan = 0, rev = .16, dly = 0} = {}) {
+  const panner = audio.createStereoPanner();
+  panner.pan.value = pan;
+  node.connect(panner).connect(master);
+  if (rev) { const g = audio.createGain(); g.gain.value = rev; panner.connect(g).connect(revIn); }
+  if (dly) { const g = audio.createGain(); g.gain.value = dly; panner.connect(g).connect(dlyIn); }
+}
+function osc(type, hz, t, end, detune = 0) {
+  const o = audio.createOscillator();
+  if (typeof type === 'string') o.type = type; else o.setPeriodicWave(type);
+  o.frequency.setValueAtTime(hz, t);
+  o.detune.value = detune;
+  o.start(t); o.stop(end);
+  return o;
+}
+function envelope(t, dur, peak, attack, sustain, decay, release) {
+  const g = audio.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(peak, t + attack);
+  g.gain.setTargetAtTime(peak * sustain, t + attack, decay);
+  g.gain.setTargetAtTime(0, t + Math.max(dur, attack), release / 4);
+  return g;
+}
+function filter(type, hz, q = .7) {
+  const f = audio.createBiquadFilter();
+  f.type = type; f.frequency.value = hz; f.Q.value = q;
+  return f;
+}
+function vibrato(t, end, rate, depth, delay) {
+  const lfo = audio.createOscillator(), amount = audio.createGain();
+  lfo.frequency.value = rate;
+  amount.gain.setValueAtTime(0, t);
+  amount.gain.linearRampToValueAtTime(depth, t + delay);
+  lfo.connect(amount); lfo.start(t); lfo.stop(end);
+  return amount;
+}
+function noiseBurst(t, dur) {
+  const src = audio.createBufferSource();
+  src.buffer = noise;
+  src.start(t, Math.random() * 1.5);
+  src.stop(t + dur);
+  return src;
+}
+
+const voices = {
+  piano(t, n, dur, vel, opt) {
+    const hz = midiHz(n), end = t + dur + .6;
+    const lp = filter('lowpass', Math.min(9000, 2400 + hz * 3));
+    lp.frequency.setTargetAtTime(700 + hz * 1.2, t + .01, .4);
+    const g = envelope(t, dur, .17 * vel, .004, .22, .55, .35);
+    osc(waves.piano, hz, t, end).connect(lp);
+    osc(waves.piano, hz, t, end, 5).connect(lp);
+    lp.connect(g); route(g, opt);
+  },
+  brass(t, n, dur, vel, opt) {
+    const hz = midiHz(n), end = t + dur + .25;
+    const lp = filter('lowpass', 380, 1.6);
+    lp.frequency.linearRampToValueAtTime(Math.min(7500, hz * 8), t + .05);
+    lp.frequency.setTargetAtTime(Math.min(5000, hz * 4.5), t + .06, .18);
+    const g = envelope(t, dur, .085 * vel, .025, .78, .25, .12);
+    const vib = vibrato(t, end, 5.6, dur > .3 ? 16 : 0, Math.min(.45, dur));
+    for (const d of [-8, 8]) { const o = osc('sawtooth', hz, t, end, d); vib.connect(o.detune); o.connect(lp); }
+    lp.connect(g); route(g, opt);
+  },
+  flute(t, n, dur, vel, opt) {
+    const hz = midiHz(n), end = t + dur + .2;
+    const g = envelope(t, dur, .2 * vel, .04, .82, .3, .1);
+    const vib = vibrato(t, end, 5.2, dur > .3 ? 18 : 4, Math.min(.5, dur));
+    const body = osc('triangle', hz, t, end), air = osc('sine', hz * 2, t, end);
+    vib.connect(body.detune); vib.connect(air.detune);
+    const airGain = audio.createGain(); airGain.gain.value = .22;
+    body.connect(g); air.connect(airGain).connect(g);
+    const breath = noiseBurst(t, .12), bp = filter('bandpass', hz * 2, 2), bg = audio.createGain();
+    bg.gain.setValueAtTime(.12 * vel, t); bg.gain.exponentialRampToValueAtTime(.001, t + .11);
+    breath.connect(bp).connect(bg).connect(g);
+    route(g, opt);
+  },
+  bell(t, n, dur, vel, opt, ratio = 3.5) {
+    const hz = midiHz(n), end = t + Math.max(dur, .9) + .6;
+    if (hz * ratio > 7000) ratio = Math.max(1, Math.floor(7000 / hz)) + .005;
+    const carrier = osc('sine', hz, t, end), mod = osc('sine', hz * ratio, t, end);
+    const index = audio.createGain();
+    index.gain.setValueAtTime(hz * 2.4, t); index.gain.setTargetAtTime(hz * .15, t, .22);
+    mod.connect(index).connect(carrier.frequency);
+    const g = audio.createGain();
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(.12 * vel, t + .003);
+    g.gain.setTargetAtTime(0, t + .003, .42);
+    carrier.connect(g); route(g, opt);
+  },
+  glass(t, n, dur, vel, opt) { voices.bell(t, n, dur, vel, opt, 2.005); },
+  organ(t, n, dur, vel, opt) {
+    const hz = midiHz(n), end = t + dur + .2;
+    const g = envelope(t, dur, .075 * vel, .012, .9, .3, .09);
+    const vib = vibrato(t, end, 6.3, 7, .05);
+    const lp = filter('lowpass', 5200);
+    for (const d of [0, 4]) { const o = osc(waves.organ, hz, t, end, d); vib.connect(o.detune); o.connect(lp); }
+    lp.connect(g); route(g, opt);
+  },
+  pluck(t, n, dur, vel, opt) {
+    const hz = midiHz(n), end = t + Math.max(dur, .6) + .3;
+    const lp = filter('lowpass', Math.min(9000, hz * 12), 3);
+    lp.frequency.setTargetAtTime(hz * 1.6, t, .13);
+    const g = audio.createGain();
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(.2 * vel, t + .002);
+    g.gain.setTargetAtTime(0, t + .002, .38);
+    osc('sawtooth', hz, t, end).connect(lp);
+    osc('square', hz * 2, t, end, -3).connect(lp);
+    lp.connect(g); route(g, opt);
+  },
+  strings(t, n, dur, vel, opt) {
+    const hz = midiHz(n), end = t + dur + .8;
+    const lp = filter('lowpass', Math.min(4200, 900 + hz * 2.2));
+    const g = envelope(t, dur, .03 * vel, .3, 1, .5, .6);
+    for (const [d, pan] of [[-11, -.55], [0, 0], [11, .55]]) {
+      const p = audio.createStereoPanner(); p.pan.value = pan;
+      osc('sawtooth', hz, t, end, d).connect(p).connect(lp);
+    }
+    lp.connect(g); route(g, {rev:.3, ...opt});
+  },
+  bass(t, n, dur, vel) {
+    const hz = midiHz(n), end = t + dur + .1;
+    const lp = filter('lowpass', 1600, 2.5);
+    lp.frequency.setTargetAtTime(380, t, .07);
+    const g = envelope(t, dur * .92, .2 * vel, .004, .62, .14, .05);
+    osc('sawtooth', hz, t, end).connect(lp);
+    const sub = osc('sine', hz, t, end), sg = audio.createGain(); sg.gain.value = .9;
+    sub.connect(sg).connect(g);
+    lp.connect(g); route(g, {rev:0});
+  }
+};
+const drum = {
+  kick(t, v = 1) {
+    const o = osc('sine', 165, t, t + .4);
+    o.frequency.exponentialRampToValueAtTime(42, t + .11);
+    const g = audio.createGain();
+    g.gain.setValueAtTime(.75 * v, t); g.gain.exponentialRampToValueAtTime(.001, t + .36);
+    o.connect(g); route(g, {rev:0});
+    const click = noiseBurst(t, .012), hp = filter('highpass', 2500), cg = audio.createGain();
+    cg.gain.value = .12 * v; click.connect(hp).connect(cg); route(cg, {rev:0});
+  },
+  snare(t, v = 1) {
+    const n = noiseBurst(t, .22), bp = filter('bandpass', 2100, .7), g = audio.createGain();
+    g.gain.setValueAtTime(.32 * v, t); g.gain.exponentialRampToValueAtTime(.001, t + .19);
+    n.connect(bp).connect(g); route(g, {rev:.18, pan:.05});
+    const body = osc('triangle', 195, t, t + .12), bg = audio.createGain();
+    body.frequency.exponentialRampToValueAtTime(150, t + .1);
+    bg.gain.setValueAtTime(.3 * v, t); bg.gain.exponentialRampToValueAtTime(.001, t + .1);
+    body.connect(bg); route(bg, {rev:.1});
+  },
+  hat(t, v = 1, open = false) {
+    const len = open ? .24 : .045;
+    const n = noiseBurst(t, len + .02), hp = filter('highpass', 7800), g = audio.createGain();
+    g.gain.setValueAtTime(.075 * v, t); g.gain.exponentialRampToValueAtTime(.001, t + len);
+    n.connect(hp).connect(g); route(g, {rev:.05, pan:.3});
+  },
+  crash(t, v = 1) {
+    const n = noiseBurst(t, 1.9), hp = filter('highpass', 4800), g = audio.createGain();
+    g.gain.setValueAtTime(.13 * v, t); g.gain.exponentialRampToValueAtTime(.001, t + 1.8);
+    n.connect(hp).connect(g); route(g, {rev:.3, pan:-.3});
+  },
+  tom(t, note, v = 1) {
+    const o = osc('sine', midiHz(note), t, t + .3), g = audio.createGain();
+    o.frequency.exponentialRampToValueAtTime(midiHz(note) * .62, t + .25);
+    g.gain.setValueAtTime(.4 * v, t); g.gain.exponentialRampToValueAtTime(.001, t + .28);
+    o.connect(g); route(g, {rev:.15});
+  }
+};
+
+// ---- Arrangement ----------------------------------------------------------
+const grooves = {
+  rock:  {k:'x.....x.x.......', s:'....x.......x...', h:'x.x.x.x.x.x.x.x.'},
+  beat:  {k:'x..x..x...x..x..', s:'....x.......x..x', h:'x.xxx.xxx.xxx.xx'},
+  drive: {k:'x...x...x...x...', s:'....x.......x...', h:'..o...o...o...o.'},
+  half:  {k:'x.........x.....', s:'........x.......', h:'x.x.x.x.x.x.x.x.'},
+  soft:  {k:'x.......x.......', s:'................', h:'..x...x...x...x.'}
+};
+// Bass figures: R root, O octave, F fifth, followed by length in sixteenths.
+const basslines = {
+  drive: {0:'R2',2:'O2',4:'R2',6:'O2',8:'R2',10:'O2',12:'R2',14:'O2'},
+  run:   {0:'R2',2:'R2',4:'O2',6:'R2',8:'R2',10:'F2',12:'O2',14:'F2'},
+  sync:  {0:'R3',3:'R3',6:'O2',8:'R3',11:'F3',14:'O2'},
+  pulse: {0:'R4',4:'F4',8:'O4',12:'F4'},
+  long:  {0:'R8',8:'R8'}
+};
+let padVoicing = [57, 60, 64];
+function voiceChord(chord) {
+  const center = padVoicing.reduce((a, b) => a + b) / padVoicing.length;
+  const notes = chord.tones.slice(0, 4).map(pc => {
+    let n = 48 + pc;
+    while (n < center - 6) n += 12;
+    return n;
+  }).sort((a, b) => a - b);
+  padVoicing = notes;
+  return notes;
+}
+function playStep(track, s, t, six) {
+  const barCount = track.bars.length, bar = Math.floor(s / 16) % barCount, pos = s % 16;
+  const loop = Math.floor(s / 16 / barCount);
+  const chords = track.bars[bar], half = chords.length > 1 && pos >= 8;
+  const chord = chords[half ? 1 : 0];
+  const note = track.line[bar * 16 + pos];
+  if (note) {
+    voices[track.lead](t, note.midi, note.len * six, 1, {pan:0, rev:.22, dly:.2});
+    if (loop % 2 === 1 && track.double)
+      voices[track.double[0]](t, note.midi + track.double[1], note.len * six, .5, {pan:.25, rev:.25});
+  }
+  if (pos === 0 || (pos === 8 && chords.length > 1)) {
+    const span = chords.length > 1 ? 8 : 16;
+    for (const n of voiceChord(chord)) voices[track.pad || 'strings'](t, n, span * six * .97, .9);
+  }
+  const figure = basslines[track.bass]?.[pos];
+  if (figure) {
+    const root = 36 + chord.root;
+    const offset = {R:0, O:12, F:chord.fifth}[figure[0]];
+    voices.bass(t, root + offset, Number(figure.slice(1)) * six, 1);
+  }
+  if (track.arp && (track.arpRate !== 8 || pos % 2 === 0)) {
+    const order = [0, 1, 2, 3, 2, 1];
+    const tones = padVoicing.concat(padVoicing.map(n => n + 12));
+    const i = order[(pos / (track.arpRate === 8 ? 2 : 1)) % order.length | 0] + (pos >= 8 ? 1 : 0);
+    voices[track.arp](t, tones[i % tones.length] + 12, six * 1.5, .32, {pan:-.35, rev:.25, dly:.1});
+  }
+  const groove = grooves[track.drums];
+  if (!groove) return;
+  if (pos === 0 && bar % 8 === 0) drum.crash(t, loop || bar ? 1 : .8);
+  const fill = bar % 8 === 7 && pos >= 12;
+  if (fill) {
+    drum.snare(t, .45 + (pos - 12) * .16);
+    if (pos % 2 === 0) drum.tom(t, pos === 12 ? 50 : 45, .8);
+    return;
+  }
+  if (groove.k[pos] === 'x') drum.kick(t);
+  if (groove.s[pos] === 'x') drum.snare(t);
+  if (groove.h[pos] !== '.') drum.hat(t, pos % 4 ? .7 : 1, groove.h[pos] === 'o');
+}
+
+// ---- Soundtrack -----------------------------------------------------------
 const musicBook = [
   [
-    scoreTrack('水面に灯る道',116,62,'dorian','flute',[0,3,5,4,0,2,3,4],
-      ['4 . 6 7 . 6 . 4','2 . . 3 4 . 1 .','7 . 9 8 6 . 4 .','3 . 1 . 0 . . .'],'10001000','00001000'),
-    scoreTrack('灯籠、天を灼く',150,57,'harmonic','brass',[0,5,3,4,0,2,5,4],
-      ['0 4 7 . 6 7 9 .','8 . 5 4 3 . 2 4','7 9 11 . 10 9 7 6','8 . 6 4 7 . . .'],'10101010','00100010')
-  ],[
-    scoreTrack('水晶洞の滴',108,66,'lydian','glass',[0,1,4,2,5,1,3,4],
-      ['7 . 3 4 . 8','6 4 . 2 . .','9 . 7 3 4 .','1 . 3 . 0 .'],'100100','000100'),
-    scoreTrack('玻璃の分光冠',144,63,'minor','prism',[0,2,5,3,1,5,3,4],
-      ['7 9 11 9 . 6 8 .','10 . 8 6 4 6 . 3','11 9 . 12 11 7 9 .','6 8 4 . 7 . . .'],'10011010','00100010')
-  ],[
-    scoreTrack('錦の渡り拍子',134,65,'major','pluck',[0,4,5,2,3,0,1,4],
-      ['2 4 . 7 6 .','4 . 2 1 . 3','4 7 9 8 . 6','3 2 . 0 . .'],'100101','000100'),
-    scoreTrack('紅角の扇舞',158,62,'harmonic','reed',[0,3,4,0,5,2,4,0],
-      ['7 . 6 4 3 4 . 7','5 6 . 8 7 . 4 3','9 . 10 9 7 4 6 .','8 6 4 . 7 . 0 .'],'10100101','00100010')
-  ],[
-    scoreTrack('峠に残る鐘',96,59,'minor','bell',[0,5,2,3,0,2,5,4],
-      ['7 . . 4 . 2 . .','5 . 3 . 1 . . .','9 . . 7 6 . 4 .','2 . 1 . 0 . . .'],'10000000','00001000'),
-    scoreTrack('六花の大聖鐘',132,64,'harmonic','organ',[0,3,5,4,2,5,1,4],
-      ['7 . 4 6 . 9','8 5 . 3 . 4','11 . 9 7 6 .','4 6 8 7 . .'],'100110','000100')
-  ],[
-    scoreTrack('紫天の星図',124,61,'dorian','orbit',[0,2,1,5,3,1,4,0],
-      ['0 . 4 8 . 6 2 .','3 7 . 9 . 5 4 .','7 . 11 8 6 . 9 .','5 . 2 4 . 1 0 .'],'10010010','00001000'),
-    scoreTrack('朔冠・双月交響',164,60,'harmonic','crown',[0,5,3,4,2,5,1,4],
-      ['0 4 7 9 11 . 10 7','8 6 . 4 5 8 9 .','11 . 13 11 9 7 6 4','8 6 4 6 7 . . .'],'10101011','00100010')
+    compose('水面に灯る道', 138,
+      'Dm|Bb|C|Am|Dm|Bb|Gm|A7|Bb|C|Am|Dm|Gm|C|F,A7|Dm',
+      `A4:2 D5 E5 F5:4 E5:2 D5 A4 | F5:6 G5:2 F5 D5 Bb4:4 | C5:2 E5 G5:4 F5:2 E5 C5:4 | E5:12 r:4 |
+       A4:2 D5 E5 F5:4 A5:2 G5 F5 | D6:6 C6:2 Bb5 A5 G5 F5 | G5:4 Bb5 A5:2 G5 F5 E5 | E5:4 C#5 A4:8 |
+       D5:3 F5 Bb5:2 A5:4 G5:2 F5 | E5:3 G5 C6:2 Bb5:4 A5:2 G5 | A5:4 E5 C6 B5:2 A5 | A5:12 G5:2 A5 |
+       Bb5:4 A5:2 G5 D6:4 C6:2 Bb5 | C6:4 Bb5:2 A5 G5:4 E5 | F5:4 A5 G5:2 E5 C#5:4 | D5:12 r:4`,
+      {lead:'flute', double:['piano', 12], arp:'bell', drums:'rock', bass:'drive'}),
+    compose('灯籠、天を灼く', 160,
+      'Am|F|G|E|Am|F|Dm,E|Am|F|G|Em|Am|Dm|G|C,F|E7',
+      `E5:2 A5 B5 C6:3 B5:1 A5:2 E5 C5 | F5:2 A5 C6:3 B5:1 A5:4 F5 | G5:2 B5 D6:3 C6:1 B5:2 G5 D5:4 | E5:2 G#5 B5 E6:6 D6:2 B5 |
+       C6:3 B5 A5:2 E5:3 A5 B5:2 | C6:3 D6 E6:2 F6:4 E6:2 D6 | D6:4 A5:2 F5 E5 G#5 B5 D6 | C6:2 B5 A5:12 |
+       A5:2 C6 F6:4 E6:2 C6 A5:4 | B5:2 D6 G6:4 F6:2 D6 B5:4 | G5:2 B5 E6:4 D6:2 B5 G5 E5 | A5:6 C6:2 E6:8 |
+       F6:3 E6 D6:2 A5:4 D6:2 E6 | F6:3 E6 D6:2 B5:4 G5 | E6:4 C6 A5 C6 | B5:4 G#5 E5:2 F5 G#5 B5`,
+      {lead:'brass', oct:-1, double:['piano', 12], arp:'piano', drums:'beat', bass:'drive'})
+  ], [
+    compose('水晶洞の滴', 126,
+      'Em|Cmaj7|Am7|B7|Em|Cmaj7|D|B7|Cmaj7|D|Bm7|Em|Am7|D|G,C|B7',
+      `B5:2 r E6 r D6 B5 G5:4 | E5:2 G5 B5:4 A5:2 G5 E5:4 | C6:2 r B5 A5 G5 A5 E5:4 | D#5:4 F#5 A5 B5 |
+       B5:2 r E6 r F#6 G6 E6:4 | G6:4 F#6:2 E6 B5:8 | A5:2 F#5 D6:4 C6:2 A5 F#5:4 | D#6:8 B5 |
+       E6:3 D6 B5:2 G5:4 B5 | F#6:3 E6 D6:2 A5:4 D6 | D6:4 F#6 E6:2 D6 B5:4 | E6:12 r:4 |
+       C6:3 B5 A5:2 E6:4 C6 | D6:3 C6 A5:2 F#6:4 D6 | G6:4 D6 E6 G6 | F#6:8 D#6:4 B5`,
+      {lead:'glass', double:['flute', -12], arp:'piano', arpRate:8, drums:'half', bass:'pulse'}),
+    compose('玻璃の分光冠', 166,
+      'Cm|Ab|Bb|G7|Cm|Ab|Fm,G|Cm|Ab|Bb|Gm|Cm|Fm|Bb|Eb,Ab|G7',
+      `G5:2 C6 D6 Eb6 D6 C6 G5:4 | Ab5:2 C6 Eb6 G6 F6 Eb6 C6:4 | Bb5:2 D6 F6 Ab6 G6 F6 D6:4 | B5:4 D6 F6 G6 |
+       Eb6:3 D6 C6:2 G5 C6 Eb6 G6 | Ab6:6 G6:2 F6 Eb6 C6:4 | F6:2 Eb6 D6 C6 B5 D6 G6:4 | C6:12 G5:2 B5 |
+       C6:2 Eb6 Ab6:4 G6:2 Eb6 C6:4 | D6:2 F6 Bb6:4 Ab6:2 F6 D6:4 | G6:3 F6 D6:2 Bb5:4 D6 | Eb6:3 D6 C6:2 G6:8 |
+       Ab6:3 G6 F6:2 C6:4 F6 | F6:3 Eb6 D6:2 Bb5:4 D6 | Eb6:4 G6 Ab6 C7 | B6:8 G6:4 D6`,
+      {lead:'piano', oct:-1, double:['brass', 0], arp:'bell', drums:'beat', bass:'sync'})
+  ], [
+    compose('錦の渡り拍子', 148,
+      'Em|C|D|Bm|Em|C|Am,B|Em|C|D|G|Em|C|D|Bm,Em|Am,B',
+      `E5:2 G5 A5 B5:4 A5:2 G5 E5 | G5:2 A5 B5 D6:4 B5:2 A5 G5 | A5:3 B5 A5:2 F#5 D5 E5 F#5 | B4:4 D5 F#5:8 |
+       E5:2 G5 A5 B5:4 D6:2 E6:4 | E6:3 D6 B5:2 G5:4 A5 | C6:2 B5 A5 E5 D#5:4 F#5 | E5:12 r:4 |
+       G5:2 E5 G5 A5 B5:4 G5 | A5:2 F#5 A5 B5 D6:4 A5 | B5:3 D6 G6:2 F#6 D6 B5:4 | E6:8 D6:4 B5 |
+       C6:3 B5 G5:2 E6:4 D6 | D6:3 B5 A5:2 F#6:4 E6 | D6:4 B5 E6 G6 | A6:4 E6 D#6 B5`,
+      {lead:'pluck', double:['flute', 0], arp:'pluck', arpRate:8, drums:'rock', bass:'run'}),
+    compose('紅角の扇舞', 172,
+      'Dm|Bb|Gm|A|Dm|Eb|C,Bb|A|Gm|Am|Bb|C|Gm|Eb|Bb,C|A7',
+      `D6:2 A5 Bb5 A5 F5 D5 A5:4 | Bb5:2 D6 F6:4 Eb6:2 D6 Bb5:4 | G5:2 Bb5 D6 G6:4 F6:2 D6 Bb5 | A5:4 C#6 E6 A6 |
+       F6:3 E6 D6:2 A5 D6 F6 A6 | G6:6 F6:2 Eb6 Bb5 G5:4 | E6:2 G6 C6 E6 D6 F6 Bb5:4 | A5:8 C#6:4 E6 |
+       D6:3 Bb5 G5:2 D6 G6 Bb6:4 | A6:3 G6 E6:2 C6:4 E6 | F6:3 D6 Bb5:2 F6 Bb6 A6 G6 | G6:6 E6:2 C6:4 E6 |
+       D6:2 G6 Bb6:4 A6:2 G6 D6:4 | Eb6:4 G6 Bb6 G6 | F6:4 D6 E6 G6 | C#7:4 A6 G6 E6`,
+      {lead:'brass', oct:-1, double:['flute', 12], arp:'pluck', drums:'drive', bass:'drive'})
+  ], [
+    compose('峠に残る鐘', 116,
+      'Bm|G|D|A|Bm|G|Em|F#|G|A|F#m|Bm|Em|A|D,G|F#7',
+      `F#5:4 B5 A5:2 F#5 D5:4 | G5:4 B5 D6 B5 | A5:6 F#5:2 D5:4 E5 | E5:8 C#5 |
+       F#5:4 B5 C#6:2 D6 F#6:4 | E6:6 D6:2 B5:8 | G5:4 B5 E6 D6 | C#6:8 A#5 |
+       B5:4 D6 G6:6 F#6:2 | E6:4 C#6 A5:8 | A5:4 C#6 F#6:6 E6:2 | D6:4 C#6 B5:8 |
+       B5:4 E6 G6:6 F#6:2 | E6:4 A6 G6 E6 | F#6:6 E6:2 D6:6 B5:2 | A#5:8 C#6:4 E6`,
+      {lead:'piano', double:['bell', 12], arp:'bell', arpRate:8, drums:'soft', bass:'long'}),
+    compose('六花の大聖鐘', 156,
+      'Em|C|Am|B|Em|C|D|B7|C|D|Bm|Em|Am|D|G,C|B7',
+      `E5:2 B5 G5 B5 E6:4 D6:2 B5 | C6:2 E6 G6:4 F#6:2 E6 C6:4 | A5:2 C6 E6:4 D6:2 C6 A5:4 | B5:4 D#6 F#6 A6 |
+       G6:3 F#6 E6:2 B5:4 E6 | G6:3 A6 B6:2 C7:4 B6:2 G6 | A6:3 F#6 D6:2 A5:4 D6 | D#6:8 F#6:4 B6 |
+       E6:4 G6 C7:6 B6:2 | A6:4 F#6 D6:6 E6:2 | F#6:4 D6 B5 D6 | E6:8 G6:4 B6 |
+       C7:3 B6 A6:2 E6:4 A6 | F#6:3 E6 D6:2 A6:4 F#6 | G6:4 B6 C7 E7 | D#7:4 B6 F#6 D#6`,
+      {lead:'organ', oct:-1, double:['bell', 12], arp:'glass', drums:'beat', bass:'sync'})
+  ], [
+    compose('紫天の星図', 134,
+      'Ebmaj7|F|Dm7|Gm|Ebmaj7|F|Gm,F|Eb|Cm7|F|Bb|Gm|Cm7|D7|Eb,F|D7',
+      `G5:2 Bb5 D6:4 C6:2 Bb5 G5:4 | A5:2 C6 F6:4 Eb6:2 C6 A5:4 | F5:2 A5 C6:4 D6:2 F6 D6:4 | D6:8 Bb5:4 A5 |
+       G5:2 Bb5 D6:4 Eb6:2 F6 G6:4 | F6:4 Eb6:2 D6 C6:4 A5 | Bb5:4 D6 C6 A5 | G5:12 r:4 |
+       Eb6:3 D6 C6:2 G5:4 Bb5 | C6:3 Bb5 A5:2 F5:4 A5 | D6:3 F6 Bb6:2 A6:4 F6 | G6:8 D6 |
+       Eb6:4 G6 Bb6 G6 | F#6:4 A6 C7 A6 | G6:4 Bb6 A6 F6 | F#6:8 D6:4 A5`,
+      {lead:'piano', oct:-1, double:['glass', 12], arp:'bell', drums:'rock', bass:'pulse'}),
+    compose('朔冠・双月交響', 176,
+      'Fm|Db|Eb|C|Fm|Db|Bbm,C|Fm|Db|Eb|Cm|Fm|Bbm|Eb|Ab,Db|C7',
+      `C6:2 F6 G6 Ab6:3 G6:1 F6:2 C6:4 | Db6:2 F6 Ab6:3 G6:1 F6:4 Db6 | Eb6:2 G6 Bb6:3 Ab6:1 G6:4 Eb6 | E6:4 G6 C7 Bb6 |
+       Ab6:3 G6 F6:2 C6 F6 Ab6 C7 | Db7:6 C7:2 Bb6 Ab6 F6:4 | Bb6:2 Ab6 F6 Db6 E6 G6 C7:4 | F6:12 C6:2 E6 |
+       F6:2 Ab6 Db7:4 C7:2 Ab6 F6:4 | G6:2 Bb6 Eb7:4 Db7:2 Bb6 G6:4 | Eb7:3 Db7 C7:2 G6:4 C7 | Ab6:6 G6:2 F6:8 |
+       Db7:3 C7 Bb6:2 F6:4 Bb6 | Bb6:3 Ab6 G6:2 Eb6:4 G6 | Ab6:4 C7 Db7 F7 | E7:4 C7 G6 E6`,
+      {lead:'brass', oct:-1, double:['piano', 12], arp:'bell', drums:'drive', bass:'drive'})
   ]
 ];
 // D–A–F–E is the four-note signature heard in the title and capture cadence.
-const overture = scoreTrack('月蝕奏鳴曲 ― 月の縁',82,62,'minor','glass',[0,5,2,4,0,3,5,4],
-  ['0 . 4 . 2 1 . .','0 . . 2 5 . 4 .','7 . 6 . 4 . 2 .','1 . . 4 1 . 0 .'],'00000000','00000000');
-const hiddenTheme = scoreTrack('虚音 ― 裏月のフーガ',170,62,'harmonic','organ',[0,4,5,2,3,5,4,0],
-  ['0 4 2 1 . 4 7 6','4 . 8 7 6 4 2 .','9 7 . 6 4 2 3 1','6 . 4 2 1 . 0 .'],'10011010','00100010');
+const overture = compose('月蝕奏鳴曲 ― 月の縁', 88,
+  'Dm|Bb|Gm|A|Dm|Bbmaj7|Gm,C|A|F|C|Dm|Bb|Gm|A|Dm,Bb|A7',
+  `D5:4 A5 F5 E5 | D5:10 C5:2 D5 F5 | G5:4 D6 Bb5 A5 | C#5:4 E5 A5:8 |
+   D6:4 A5 F5 E5 | D5:6 F5:2 A5:8 | Bb5:4 A5:2 G5 E5:4 G5 | A5:16 |
+   A5:4 C6 F6 E6 | E6:6 D6:2 C6:4 G5 | F5:4 A5 D6 C6 | D6:8 Bb5 |
+   G5:4 Bb5 D6 F6 | E6:8 C#6 | D6:4 A5 F5 E5 | E5:8 C#5:4 A4`,
+  {lead:'piano', double:['glass', 12], arp:'piano', arpRate:8, bass:'long'});
+const hiddenTheme = compose('虚音 ― 裏月のフーガ', 180,
+  'Dm|Gm|C|F|Bb|Edim|A|Dm|Gm|A|Dm|Bb|Gm|A|Dm,Bb|A7',
+  `D6:1 A5 F5 A5 D6 E6 F6 E6 D6:2 A5 F5:4 | G6:1 D6 Bb5 D6 G6 A6 Bb6 A6 G6:2 D6 Bb5:4 |
+   E6:1 C6 G5 C6 E6 F6 G6 F6 E6:2 C6 G5:4 | F6:1 C6 A5 C6 F6 G6 A6 G6 F6:2 C6 A5:4 |
+   D6:2 F6 Bb6:4 A6:2 G6 F6:4 | E6:2 G6 Bb6:4 A6:2 G6 E6:4 | C#6:2 E6 A6:4 G6:2 E6 C#6:4 | D6:1 E6 F6 G6 A6:4 F6:2 D6 A5:4 |
+   Bb6:3 A6 G6:2 D6:4 G6 | A6:3 G6 E6:2 C#6:4 E6 | F6:1 E6 D6 C#6 D6 E6 F6 G6 A6:8 | Bb6:4 F6 D6 Bb5 |
+   G6:1 F6 E6 D6 Bb6:4 A6:2 G6 D6:4 | C#7:4 A6 E6 G6 | F6:4 A6 D7 F6 | E6:2 G6 C#6 E6 A5:8`,
+  {lead:'organ', oct:-1, double:['brass', 0], pad:'organ', drums:'beat', bass:'run'});
 let currentTrack;
-function overtureBeat(step,t,eighth) {
-  const beat = step%8, bar = Math.floor(step/8)%8;
-  const root = overture.roots[bar], degree = overture.phrases[bar%4][beat];
-  if (degree !== null) playLead(overture,t,eighth*1.5,pitch(overture,degree)+12);
-  if (beat === 0) {
-    for (const interval of [0,2,4]) silk(t,eighth*7.8,pitch(overture,root+interval)-12,false);
-    instrument(t,eighth*5,midiHz(pitch(overture,root)-24),'sine',.17,.08);
-  }
-  if (bar >= 2 && beat%2 === 1)
-    instrument(t,eighth*1.8,midiHz(pitch(overture,root+[0,4,2,6][beat>>1])),'triangle',.085);
-  if (bar >= 4 && beat === 6)
-    instrument(t,eighth*1.7,midiHz(pitch(overture,root+7)),'sine',.10,.04);
-}
+
+// ---- Sound effects --------------------------------------------------------
+let lastCue = {};
 function soundCue(kind) {
   if (!musicEnabled || audio?.state !== 'running') return;
-  const t = audio.currentTime+.006;
-  const tone = (dt,d,n,voice,g,end) =>
-    instrument(t+dt,d,midiHz(n),voice,g,.004,end === undefined ? undefined : midiHz(end));
-  if (kind === 'capture' || kind === 'spell') {
-    const notes = kind === 'capture' ? [74,81,77,76,86] : [74,81,77,76];
-    notes.forEach((n,i)=>tone(i*.09,.30,n,kind==='capture'?'triangle':'sine',.16));
-  } else if (kind === 'bomb') {
-    tone(0,.62,53,'sine',.48,28);
-    for (let i=0;i<4;i++) tone(.045*i,.35,62+5*i,'triangle',.14);
-  } else if (kind === 'hit') {
-    tone(0,.22,69,'triangle',.26,41); tone(.04,.3,47,'sine',.28,32);
-  } else if (kind === 'power') {
-    tone(0,.12,78,'sine',.15); tone(.06,.22,85,'triangle',.13);
-  } else if (kind === 'coin') {
-    if (t-lastCoin < .10) return;
-    lastCoin=t; tone(0,.08,89,'sine',.07);
-  } else if (kind === 'shot') {
-    const fox = player.pilot==='ember';
-    tone(0,fox?.10:.055,fox?70:85,fox?'triangle':'sine',fox?.060:.045,fox?47:74);
+  const t = audio.currentTime + .005;
+  const gap = {shot:.075, graze:.045, coin:.05, tick:.5}[kind];
+  if (gap && t - (lastCue[kind] ?? -1) < gap) return;
+  lastCue[kind] = t;
+  const fx = {rev:.12};
+  switch (kind) {
+    case 'shot': {
+      const n = noiseBurst(t, .04), hp = filter('highpass', player.pilot === 'ember' ? 2400 : 4200), g = audio.createGain();
+      g.gain.setValueAtTime(.05, t); g.gain.exponentialRampToValueAtTime(.001, t + .035);
+      n.connect(hp).connect(g); route(g, {rev:0});
+      break;
+    }
+    case 'graze': {
+      const n = noiseBurst(t, .06), bp = filter('bandpass', 6500, 3), g = audio.createGain();
+      g.gain.setValueAtTime(.09, t); g.gain.exponentialRampToValueAtTime(.001, t + .05);
+      n.connect(bp).connect(g); route(g, {rev:0});
+      break;
+    }
+    case 'spell': {
+      const n = noiseBurst(t, .8), bp = filter('bandpass', 300, 1.5), g = audio.createGain();
+      bp.frequency.exponentialRampToValueAtTime(5000, t + .6);
+      g.gain.setValueAtTime(.001, t); g.gain.linearRampToValueAtTime(.22, t + .45); g.gain.exponentialRampToValueAtTime(.001, t + .78);
+      n.connect(bp).connect(g); route(g, {rev:.3});
+      [74, 81, 77, 76].forEach((m, i) => voices.bell(t + .45 + i * .08, m, .3, .9, fx));
+      break;
+    }
+    case 'capture':
+      [74, 81, 77, 76, 86].forEach((m, i) => voices.bell(t + i * .075, m, .4, 1, {rev:.3}));
+      voices.strings(t, 62, .9, 2); voices.strings(t, 69, .9, 2);
+      break;
+    case 'bomb': {
+      const o = osc('sine', 90, t, t + 1.2), g = audio.createGain();
+      o.frequency.exponentialRampToValueAtTime(28, t + 1);
+      g.gain.setValueAtTime(.7, t); g.gain.exponentialRampToValueAtTime(.001, t + 1.1);
+      o.connect(g); route(g, {rev:.2});
+      const n = noiseBurst(t, 1.3), lp = filter('lowpass', 6000), ng = audio.createGain();
+      lp.frequency.exponentialRampToValueAtTime(200, t + 1.2);
+      ng.gain.setValueAtTime(.3, t); ng.gain.exponentialRampToValueAtTime(.001, t + 1.25);
+      n.connect(lp).connect(ng); route(ng, {rev:.3});
+      [62, 69, 74, 81].forEach((m, i) => voices.bell(t + .05 + i * .05, m, .5, .7, {rev:.35}));
+      break;
+    }
+    case 'hit': {
+      const o = osc('square', 1400, t, t + .5), g = audio.createGain(), lp = filter('lowpass', 3000);
+      o.frequency.exponentialRampToValueAtTime(70, t + .45);
+      g.gain.setValueAtTime(.12, t); g.gain.exponentialRampToValueAtTime(.001, t + .48);
+      o.connect(lp).connect(g); route(g, {rev:.2});
+      const n = noiseBurst(t, .5), ng = audio.createGain();
+      ng.gain.setValueAtTime(.2, t); ng.gain.exponentialRampToValueAtTime(.001, t + .45);
+      n.connect(ng); route(ng, {rev:.25});
+      break;
+    }
+    case 'power': [79, 83, 86, 91].forEach((m, i) => voices.bell(t + i * .04, m, .15, .6, fx)); break;
+    case 'coin': voices.bell(t, 98, .08, .35, {rev:.05}, 2.005); break;
+    case 'cancel': [86, 91, 93, 98].forEach((m, i) => voices.bell(t + i * .05, m, .2, .45, {rev:.3}, 2.005)); break;
+    case 'tick': voices.bell(t, 84, .1, .7, {rev:.05}, 1.5); break;
+    case 'extend': [74, 78, 81, 86, 90].forEach((m, i) => voices.bell(t + i * .07, m, .3, .9, {rev:.3})); break;
   }
-}
-let lastCoin = -1;
-function pitch(track, degree) {
-  return track.tonic + 12*Math.floor(degree/7) + track.scale[(degree%7+7)%7];
 }
 
-function playLead(track,t,d,note) {
-  const hz = midiHz(note);
-  switch (track.voice) {
-    case 'bell': case 'glass': case 'prism':
-      instrument(t,d*1.7,hz,'sine',.23);
-      instrument(t,d*.53,hz*(track.voice==='bell'?2.71:3.01),'sine',.08);
-      if (track.voice==='prism') silk(t,d,note,true);
-      break;
-    case 'flute': case 'pluck': case 'orbit':
-      instrument(t,d,hz,'triangle',.22,track.voice==='flute'?.055:.007);
-      instrument(t,d*.65,hz*(track.voice==='orbit'?1.5:2),'sine',.075);
-      break;
-    default:
-      silk(t,d,note,true);
-      instrument(t,d*.87,hz/2,'triangle',.14);
-      if (track.voice==='organ' || track.voice==='crown') instrument(t,d,hz*1.5,'sine',.095);
-      if (track.voice==='reed') instrument(t,d*.75,hz*2,'triangle',.058);
+// ---- Engine ---------------------------------------------------------------
+function buildAudio(ctx) {
+  audio = ctx;
+  master = audio.createGain(); master.gain.value = .5;
+  const comp = audio.createDynamicsCompressor();
+  comp.threshold.value = -16; comp.knee.value = 8; comp.ratio.value = 3.5;
+  comp.attack.value = .004; comp.release.value = .2;
+  master.connect(comp).connect(audio.destination);
+  // A dark stereo hall: decaying noise, low-passed more strongly as the tail ages.
+  const sr = audio.sampleRate, length = Math.floor(sr * 2.6);
+  const impulse = audio.createBuffer(2, length, sr);
+  for (let c = 0; c < 2; c++) {
+    const data = impulse.getChannelData(c);
+    let y = 0;
+    for (let i = 0; i < length; i++) {
+      const x = (Math.random() * 2 - 1) * Math.exp(-i / (sr * .6));
+      y += (x - y) * (.55 * Math.exp(-i / (sr * 1.1)) + .07);
+      data[i] = i < sr * .018 ? 0 : y * 2.2;
+    }
   }
+  const verb = audio.createConvolver(); verb.buffer = impulse;
+  revIn = audio.createGain();
+  const revOut = audio.createGain(); revOut.gain.value = .55;
+  revIn.connect(filter('highpass', 220)).connect(verb).connect(revOut).connect(master);
+  // Ping-pong echo for leads.
+  dlyIn = audio.createGain();
+  const left = audio.createDelay(2), right = audio.createDelay(2);
+  const fbL = audio.createGain(), fbR = audio.createGain(), wet = audio.createGain();
+  fbL.gain.value = fbR.gain.value = .32; wet.gain.value = .45;
+  const panL = audio.createStereoPanner(), panR = audio.createStereoPanner();
+  panL.pan.value = -.75; panR.pan.value = .75;
+  const tone = filter('lowpass', 3800);
+  dlyIn.connect(tone).connect(left);
+  left.connect(panL).connect(wet); right.connect(panR).connect(wet);
+  left.connect(fbL).connect(right); right.connect(fbR).connect(left);
+  wet.connect(master);
+  dlyTaps = [left, right];
+  noise = audio.createBuffer(1, sr * 2, sr);
+  const samples = noise.getChannelData(0);
+  for (let i = 0; i < samples.length; i++) samples[i] = Math.random() * 2 - 1;
+  const real = new Float32Array(12), piano = new Float32Array([0,1,.5,.28,.2,.12,.08,.05,.035,.02,.012,.008]);
+  waves.piano = audio.createPeriodicWave(real, piano);
+  waves.organ = audio.createPeriodicWave(new Float32Array(9), new Float32Array([0,1,.75,.45,.4,0,.22,0,.2]));
 }
-
-function scoreBeat(track,boss,step,t,eighth) {
-  const beats = track.kick.length, beat = step % beats;
-  const bar = Math.floor(step/beats) % track.roots.length, root = track.roots[bar];
-  const phrase = track.phrases[bar%4];
-  const degree = phrase[beat];
-  if (degree !== null) {
-    let span = 1;
-    while (beat+span < beats && phrase[beat+span]===null) span++;
-    const note = pitch(track,degree+(bar>=4 && beat===0 ? 2:0));
-    playLead(track,t,eighth*span*.94,note);
-    if (boss && bar>=4) instrument(t,eighth*span,midiHz(note+12),'sine',.06,.02);
-  }
-  if (beat===0) {
-    for (const interval of [0,2,4,6]) silk(t,eighth*beats,pitch(track,root+interval)-12,false);
-  }
-  const arpeggio = [0,4,2,6,4,7,6,2];
-  if (boss || beat%2===1) {
-    instrument(t,eighth*1.16,midiHz(pitch(track,root+arpeggio[beat])),'triangle',boss?.12:.085);
-  }
-  if (boss || stage==='crossing') {
-    if (beat%2===1) instrument(t+eighth*.5,eighth*.85,midiHz(pitch(track,root+2+(bar+beat)%5)+12),'sine',.10);
-  }
-  if (track.kick[beat]==='1') instrument(t,.17,132,'sine',.48,.003,43);
-  if (beat%2===1) {
-    instrument(t,eighth*.92,midiHz(pitch(track,root)-24),'triangle',.25);
-    percussion(t,false);
-  }
-  if (track.snare[beat]==='1') percussion(t,true);
+function setTempo(track) {
+  const echo = 60 / track.bpm * .75;
+  for (const d of dlyTaps) d.delayTime.setTargetAtTime(echo, audio.currentTime, .05);
 }
 
 function sequenceMusic() {
@@ -506,15 +860,15 @@ function sequenceMusic() {
   if (currentTrack !== track) {
     currentTrack = track;
     step = 0;
-    echo.delayTime.setTargetAtTime(45/track.bpm,audio.currentTime,.06);
-    musicButton.title = track.title;
+    nextStep = audio.currentTime + .08;
+    setTempo(track);
+    musicButton.title = '♪ ' + track.title;
   }
-  nextBeat = Math.max(nextBeat,audio.currentTime+.007);
-  const eighth = 30 / track.bpm;
-  while (nextBeat < audio.currentTime+.11) {
-    if (track === overture) overtureBeat(step++,nextBeat,eighth);
-    else scoreBeat(track,boss,step++,nextBeat,eighth);
-    nextBeat += eighth;
+  const six = 15 / track.bpm;
+  nextStep = Math.max(nextStep, audio.currentTime + .01);
+  while (nextStep < audio.currentTime + .16) {
+    playStep(track, step++, nextStep, six);
+    nextStep += six;
   }
 }
 
@@ -526,35 +880,12 @@ function syncMusic() {
   }
   const AudioEngine = window.AudioContext || window.webkitAudioContext;
   if (!AudioEngine) return;
-  if (!audio) {
-    audio = new AudioEngine();
-    master = audio.createGain(); master.gain.value = .42;
-    const limiter = audio.createDynamicsCompressor();
-    limiter.threshold.value = -12; limiter.ratio.value = 4;
-    master.connect(limiter).connect(audio.destination);
-    hall = audio.createConvolver();
-    const length = Math.floor(audio.sampleRate * 1.65);
-    const impulse = audio.createBuffer(2, length, audio.sampleRate);
-    for (let c = 0; c < 2; c++) {
-      const samples = impulse.getChannelData(c);
-      for (let i = 0; i < length; i++) samples[i] = (Math.random()*2-1) * (1-i/length)**3;
-    }
-    hall.buffer = impulse;
-    const send = audio.createGain(); send.gain.value = .22;
-    hall.connect(send).connect(master);
-    echo = audio.createDelay(); echo.delayTime.value = 60 / 136 * .75;
-    const wet = audio.createGain(); wet.gain.value = .16;
-    echo.connect(wet).connect(master);
-    noise = audio.createBuffer(1, Math.ceil(audio.sampleRate * .2), audio.sampleRate);
-    const samples = noise.getChannelData(0);
-    for (let i = 0; i < samples.length; i++) samples[i] = Math.random() * 2 - 1;
-  }
-  master.gain.setTargetAtTime(mode === 'dialogue' ? .22 : .42,audio.currentTime,.09);
+  if (!audio) buildAudio(new AudioEngine());
+  master.gain.setTargetAtTime(mode === 'dialogue' ? .28 : .5, audio.currentTime, .09);
   musicButton.textContent = '音 ON';
   musicButton.setAttribute('aria-pressed','true');
-  nextBeat = audio.currentTime + .04;
   audio.resume().catch(() => {});
-  musicTimer = setInterval(sequenceMusic, 30);
+  musicTimer = setInterval(sequenceMusic, 25);
 }
 musicButton.addEventListener('click', () => {
   musicEnabled = audio ? !musicEnabled : true;
@@ -563,6 +894,7 @@ musicButton.addEventListener('click', () => {
   syncMusic();
   musicButton.blur();
 });
+
 
 function unlockTitle(event) {
   if (mode === 'title' && !audio && musicEnabled && !musicButton.contains(event.target) && event.target !== action) syncMusic();
@@ -574,10 +906,10 @@ document.addEventListener('keydown', event => {
 
 const meterLabel = document.querySelector('#meter-label');
 const sealDuration = 18;
-let rewardTime = 0;
+let rewardTime = 0, lastTick = 99;
 const bombButton = document.querySelector('#bomb');
-const bombInterval = 25000;
-const extendInterval = 100000;
+const bombInterval = 80000;
+const extendInterval = 400000;
 const extendTarget = document.querySelector('#extend-target');
 const extendNotice = document.querySelector('#extend-notice');
 let nextExtendScore, extendTime;
@@ -613,12 +945,19 @@ function renderFolio() {
 function finishSpell(enemy) {
   const name = enemy.captureName;
   enemy.captureName = null;
-  if (!name || collected.has(name)) return;
+  if (!name) return;
+  const left = Math.max(0, (enemy.kind === 'mid' ? enemy.sealLeft : enemy.timer) || 0);
+  const bonus = Math.round((8000 + chapterIndex * 3000 + rank * 2000 + left * 150) / 10) * 10;
+  score += bonus;
+  updateHUD();
   soundCue('capture');
-  collected.add(name);
-  saved(name, true);
-  renderFolio();
-  captureNotice.textContent = '音譜獲得　' + name;
+  const fresh = !collected.has(name);
+  if (fresh) {
+    collected.add(name);
+    saved(name, true);
+    renderFolio();
+  }
+  captureNotice.textContent = 'Spell Capture!!　＋' + bonus.toLocaleString() + (fresh ? '　音譜獲得「' + name + '」' : '');
   captureNotice.hidden = false;
   captureTime = 3;
 }
@@ -669,7 +1008,9 @@ function useBomb() {
   bombs--;
   bombX = player.x;
   bombLeft = bombDuration;
-  bullets = [];
+  player.hitPending = 0;
+  player.invincible = Math.max(player.invincible, bombDuration + .3);
+  cancelBullets(false);
   for (const enemy of [...enemies]) {
     if (enemy.hp > 0 && enemy.age >= 0 && enemy.x >= 0 && enemy.x <= width &&
         enemy.y >= 0 && enemy.y <= height) {
@@ -687,8 +1028,8 @@ function reset() {
   captureNotice.hidden = true; captureTime = 0;
   step = 0;
   nextExtendScore = extendInterval; extendTime = 0; extendNotice.hidden = true;
-  bombs = 2; bombLeft = dropIndex = 0; nextBombScore = bombInterval;
-  player = { pilot: pilotSelect.value, facing: 'north', flip: false, lean: 0, x: width / 2, y: height - 88, radius: 4, life: 3, invincible: 0 };
+  bombs = 3; bombLeft = dropIndex = 0; nextBombScore = bombInterval;
+  player = { pilot: pilotSelect.value, facing: 'north', flip: false, lean: 0, x: width / 2, y: height - 88, radius: 2.5, life: 3, invincible: 0, hitPending: 0 };
   score = graze = power = 0;
   touchMode = matchMedia('(pointer: coarse)').matches;
   enterChapter(0);
@@ -723,6 +1064,7 @@ function updateHUD() {
     const gained = 1 + Math.floor((score - nextExtendScore) / extendInterval);
     nextExtendScore += gained * extendInterval;
     player.life += gained;
+    soundCue('extend');
     extendTime = 2;
     extendNotice.hidden = false;
     extendNotice.textContent = '残機＋' + gained;
@@ -844,163 +1186,387 @@ for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
   });
 }
 
-function emit(enemy, angle, speed, form, turn = 0) {
-  const bullet = { x: enemy.x, y: enemy.y + 13, angle, speed, form, turn, grazed: false };
-  bullets.push(bullet);
-  return bullet;
+// ---- Bullet engine --------------------------------------------------------
+// Optional bullet fields: acc/vmin/vmax (speed change), w/wEnd/flipAt (curving),
+// aimAt/aimV/aimAcc/aimMax/jitter/recolor (stop and re-aim), hold (frozen but
+// visible), delay (not yet fired), g/vfall (gravity), swing (sway around the
+// launch angle), bounce (reflect off side walls), split (burst into a ring),
+// grace (seconds it may spend off-screen).
+const densityScale = () => [.6, .8, 1, 1.22][rank];
+const speedScale = () => [.86, .94, 1, 1.07][rank];
+const count = (base, min = 3) => Math.max(min, Math.round(base * densityScale()));
+const byRank = list => list[rank];
+const rnd = (a, b) => a + Math.random() * (b - a);
+const aimFrom = (x, y) => Math.atan2(player.y - y, player.x - x);
+let spawned = [];
+function shoot(x, y, a, v, form, color, o) {
+  const s = speedScale();
+  const b = {x, y, a, v: v * s, form, color, t: 0, ...o};
+  if (b.vmax) b.vmax *= s;
+  if (b.aimMax) b.aimMax *= s;
+  if (b.swing) b.base = a;
+  spawned.push(b);
+  return b;
+}
+function ringOf(x, y, n, offset, v, form, color, o) {
+  for (let i = 0; i < n; i++) shoot(x, y, offset + i * tau / n, v, form, color, o);
+}
+function fanOf(x, y, center, n, spread, v, form, color, o) {
+  for (let i = 0; i < n; i++) shoot(x, y, center + (i - (n - 1) / 2) * spread, v, form, color, o);
 }
 
-// Radial expansion and angular sway share a phase across neighboring rays.
-// Radius always advances; the outline breathes without accumulating orbiting bullets.
-const petals = [
-  {lobes:4, depth:.24, sway:.16, rate:1.8},
-  {lobes:6, depth:.31, sway:.09, rate:2.2},
-  {lobes:3, depth:.27, sway:.27, rate:1.9},
-  {lobes:5, depth:.19, sway:.13, rate:2.4},
-  {lobes:2, depth:.34, sway:.32, rate:1.65}
-];
-function bloom(enemy, angle, speed, form, turn, phase) {
-  const bullet = emit(enemy, angle, speed, form, turn);
-  const shape = petals[chapterIndex];
-  bullet.path = {x:bullet.x, y:bullet.y, angle, time:0, shape,
-    phase:shape.lobes*angle + phase};
-}
-function ring(enemy, count, offset, speed, form, turn = 0) {
-  for (let i = 0; i < count; i++) {
-    bloom(enemy, offset + i*tau/count, speed, form, turn, offset);
+function advanceBullet(b, dt) {
+  if (b.delay > 0) { b.delay -= dt; return; }
+  b.t += dt;
+  if (b.hold && b.t < b.hold) return;
+  if (b.acc) b.v = clamp(b.v + b.acc * dt, b.vmin ?? 0, b.vmax ?? 900);
+  if (b.w) {
+    b.a += b.w * dt;
+    if (b.flipAt && b.t >= b.flipAt) { b.w = -b.w; b.flipAt = 0; }
+    if (b.wEnd && b.t >= b.wEnd) b.w = 0;
+  }
+  if (b.swing) b.a = b.base + b.swing.amp * Math.sin(b.t * b.swing.freq + b.swing.ph);
+  if (b.aimAt && b.t >= b.aimAt) {
+    b.a = aimFrom(b.x, b.y) + (b.jitter ? rnd(-b.jitter, b.jitter) : 0);
+    b.v = b.aimV ?? b.v; b.acc = b.aimAcc ?? b.acc; b.vmax = b.aimMax ?? b.vmax;
+    if (b.recolor) b.color = b.recolor;
+    b.aimAt = 0;
+  }
+  if (b.g) {
+    const vx = Math.cos(b.a) * b.v;
+    let vy = Math.sin(b.a) * b.v + b.g * dt;
+    if (b.vfall) vy = Math.min(vy, b.vfall);
+    b.v = Math.hypot(vx, vy); b.a = Math.atan2(vy, vx);
+  }
+  b.x += Math.cos(b.a) * b.v * dt;
+  b.y += Math.sin(b.a) * b.v * dt;
+  if (b.bounce && (b.x < 4 || b.x > width - 4)) {
+    b.a = Math.PI - b.a; b.x = clamp(b.x, 4, width - 4); b.bounce--;
+  }
+  if (b.split && b.t >= b.split.at) {
+    const s = b.split;
+    b.dead = true;
+    ringOf(b.x, b.y, s.n, b.a + Math.PI / s.n, s.v, s.form, s.color);
+    if (s.inner) ringOf(b.x, b.y, s.inner.n, b.a, s.inner.v, s.inner.form, s.inner.color);
   }
 }
 
-function advanceBullet(bullet, dt) {
-  const path = bullet.path;
-  if (path) {
-    path.time += dt;
-    const {time, shape, phase} = path;
-    const wave = phase + time*shape.rate;
-    const distance = bullet.speed*(time + shape.depth*(Math.sin(wave)-Math.sin(phase))/shape.rate);
-    bullet.angle = path.angle + bullet.turn*time + shape.sway*(Math.sin(wave)-Math.sin(phase));
-    bullet.x = path.x + distance*Math.cos(bullet.angle);
-    bullet.y = path.y + distance*Math.sin(bullet.angle);
-    return;
+// Bullets left on screen turn into glittering points that home on the player.
+function cancelBullets(award) {
+  let n = 0;
+  for (const b of bullets) {
+    if (b.delay > 0) continue;
+    n++;
+    if (n <= 260) sparks.push({x: b.x, y: b.y, vx: rnd(-40, 40), vy: rnd(-60, 0), time: .7, color: '#ffe9a0', home: true});
   }
-  bullet.angle += bullet.turn * dt;
-  bullet.x += Math.cos(bullet.angle) * bullet.speed * dt;
-  bullet.y += Math.sin(bullet.angle) * bullet.speed * dt;
+  bullets = []; spawned = [];
+  if (award && n) { score += n * 10; soundCue('cancel'); updateHUD(); }
 }
 
-function volley(enemy) {
-  const aim = Math.atan2(player.y - enemy.y - 13, player.x - enemy.x);
-  const n = enemy.volley++;
-  const firstBullet = bullets.length;
-  if (hiddenBoss && enemy.kind === 'boss') {
-    const rays = densities[rank].rays + 2*enemy.phase;
-    const spin = n*.21;
-    ring(enemy, rays, spin, 124, 'moon', .24);
-    ring(enemy, rays, -spin, 148, 'note', -.24);
-    if (n % 3 === 0) {
-      for (let i = -enemy.phase; i <= enemy.phase; i++) emit(enemy, aim + i*.13, 176, 'star');
-    }
-    enemy.cooldown = .90 - .06*rank - .07*enemy.phase;
-  } else if (chapterIndex && (enemy.kind === 'boss' || (enemy.kind === 'mid' && enemy.phase === 2))) {
-    chapterVolley(enemy, aim, n);
-  } else if (enemy.kind === 'mid' && enemy.phase === 1) {
-    for (let i = -2-rank; i <= 2+rank; i++) emit(enemy, aim + i * .17, 135, 'pearl');
-    enemy.cooldown = .96 - rank * .09;
-  } else if (enemy.kind === 'mid') {
-    ring(enemy, 9 + rank * 3, n * .18, 106, 'note', .14);
-    if (n % 2 === 0) ring(enemy, 4 + rank * 2, aim, 145, 'star');
-    enemy.cooldown = .67 - .07 * rank;
-  } else if (enemy.kind === 'boss') {
-    const phase = enemy.phase;
-    const rays = densities[rank].rays;
-    if (phase === 1) {
-      ring(enemy, rays, n * .21, 122, 'seed', .17);
-    } else if (phase === 2) {
-      // Both fans leave the same opening when their row reaches the lower field.
-      const opening = width/2 + 96*Math.sin(n*.28);
-      const lanes = 6 + rank*2;
-      for (const side of [-1,1]) {
-        const lantern = {x:enemy.x + side*50, y:enemy.y};
-        const edge = side < 0 ? -24 : width+24;
-        const inner = opening + side*(42-rank*3);
-        for (let i=0; i<lanes; i++) {
-          const target = inner + (edge-inner)*i/(lanes-1);
-          const dx = target-lantern.x, dy = height-90-lantern.y-13;
-          emit(lantern, Math.atan2(dy,dx), Math.hypot(dx,dy)/3.1, 'pearl');
+// ---- Spell cards ------------------------------------------------------------
+// Each pattern fires once per call and returns the delay until its next volley.
+// e.t is the time spent in the current phase, k the volley counter.
+const patternBook = [
+  { // 夜の参道 — tide, clockwork, lanterns, stars, moon wheels
+    mid: {move:'wander', fire(e, k) {
+      if (k % 3 < 2) fanOf(e.x, e.y, aimFrom(e.x, e.y), byRank([3,5,5,7]), .17, 175, 'rice', 'cyan');
+      else ringOf(e.x, e.y, count(18), k * .2, 105, 'orb', 'blue');
+      return byRank([.8, .68, .6, .52]);
+    }},
+    spells: [
+      {move:'center', fire(e, k) { // 潮の六重奏
+        const arms = rank ? 6 : 4, base = 1.5 * Math.sin(e.t * .85) + e.t * .25;
+        for (let i = 0; i < arms; i++) shoot(e.x, e.y, base + i * tau / arms, 150, 'rice', 'blue');
+        if (k % 2) for (let i = 0; i < arms; i++) shoot(e.x, e.y, -base + (i + .5) * tau / arms, 112, 'rice', 'cyan');
+        return byRank([.17, .13, .11, .1]);
+      }},
+      {move:'center', fire(e, k) { // 薄明の星時計
+        for (const s of [0, Math.PI]) shoot(e.x, e.y, e.t * 1.15 + s, 140, 'orb', 'gold');
+        if (k % 3 === 0) for (let i = 0; i < 3; i++) shoot(e.x, e.y, -e.t * .45 + i * tau / 3, 100, 'rice', 'purple');
+        if (k % 12 === 0) for (const v of rank ? [82, 108, 134] : [90, 125]) ringOf(e.x, e.y, 12, e.t * .2, v, 'star', 'white');
+        return byRank([.14, .11, .1, .09]);
+      }},
+      {move:'center', fire(e, k) { // 宵宮・双つの灯籠
+        e.sats = [];
+        for (const side of [-1, 1]) {
+          const x = e.x + side * 76 * Math.cos(e.t * .8), y = e.y + 20 + 18 * Math.sin(e.t * 1.6);
+          e.sats.push([x, y, 'orange']);
+          ringOf(x, y, count(14), side * k * .17, 104, 'ball', side < 0 ? 'orange' : 'gold', {w: side * .32});
         }
+        if (k % 3 === 2) fanOf(e.x, e.y, aimFrom(e.x, e.y), byRank([1, 3, 3, 5]), .14, 190, 'kunai', 'red');
+        return byRank([.9, .72, .6, .52]);
+      }},
+      {move:'wander', fire(e, k) { // 満潮・星渡り
+        ringOf(e.x, e.y, count(24), k * .13, 230, 'star', 'gold',
+          {acc:-300, aimAt:.95, aimV:0, aimAcc:220, aimMax:235, jitter:.1, recolor:'white'});
+        if (k % 2) ringOf(e.x, e.y, count(14), -k * .2, 88, 'orb', 'blue');
+        return byRank([1.25, 1.02, .9, .8]);
+      }},
+      {move:'center', fire(e, k) { // 終奏・逆巻く月輪
+        const spin = e.t * (1.6 + .3 * Math.sin(e.t * .4));
+        for (let i = 0; i < 3; i++) {
+          shoot(e.x, e.y, spin + i * tau / 3, 150, 'orb', 'pink');
+          shoot(e.x, e.y, -spin + i * tau / 3 + .5, 150, 'orb', 'purple');
+        }
+        if (k % 14 === 0) { const n = count(10, 6); ringOf(e.x, e.y, n, aimFrom(e.x, e.y) + Math.PI / n, 78, 'big', 'pink', {w:.18}); }
+        return byRank([.14, .115, .1, .088]);
+      }}
+    ]
+  },
+  { // 水晶の底流 — mirrors, reflections, prisms
+    mid: {move:'wander', fire(e, k) {
+      if (k % 2 === 0) ringOf(e.x, e.y, count(20), aimFrom(e.x, e.y), 140, 'kunai', 'cyan');
+      else fanOf(e.x, e.y, aimFrom(e.x, e.y), 3, .32, 112, 'ball', 'white');
+      return byRank([.9, .78, .7, .62]);
+    }},
+    spells: [
+      {move:'center', fire(e, k) { // 水鏡のカノン — the right voice imitates the left half a second later
+        const lead = e.t * 1.55, echo = (e.t - .5) * 1.55;
+        e.sats = [[e.x - 62, e.y, 'cyan'], [e.x + 62, e.y, 'purple']];
+        for (const s of [0, Math.PI]) {
+          shoot(e.x - 62, e.y, lead + s, 138, 'rice', 'cyan');
+          if (e.t > .5) shoot(e.x + 62, e.y, Math.PI - echo + s, 138, 'rice', 'purple');
+        }
+        return byRank([.14, .105, .088, .078]);
+      }},
+      {move:'wander', fire(e, k) { // 反射する水脈
+        const n = count(7);
+        fanOf(e.x, e.y, Math.PI * .86, n, .07, 200, 'kunai', 'cyan', {bounce:1});
+        fanOf(e.x, e.y, Math.PI * .14, n, .07, 200, 'kunai', 'blue', {bounce:1});
+        if (k % 2) fanOf(e.x, e.y, aimFrom(e.x, e.y), 3, .26, 112, 'ball', 'white');
+        return byRank([.8, .64, .54, .46]);
+      }},
+      {move:'center', fire(e, k) { // 双晶回廊 — two swaying walls and a narrow corridor
+        e.sats = [];
+        for (const s of [-1, 1]) {
+          const x = width / 2 + s * 150, y = 150;
+          e.sats.push([x, y, s < 0 ? 'cyan' : 'purple']);
+          fanOf(x, y, Math.PI / 2 - s * (.5 + .42 * Math.sin(e.t * 1.3)), 3, .09, 175, 'orb', s < 0 ? 'cyan' : 'purple');
+        }
+        if (k % 6 === 0) ringOf(e.x, e.y, count(12), k * .3, 84, 'ball', 'white');
+        if (k % 9 === 4) shoot(e.x, e.y, aimFrom(e.x, e.y), 160, 'kunai', 'blue');
+        return byRank([.26, .2, .17, .15]);
+      }},
+      {move:'wander', fire(e, k) { // 硝子の奔流
+        ringOf(e.x, e.y, count(8, 5), k * .37, 170, 'ball', 'white',
+          {acc:-160, vmin:25, split:{at:.85, n:count(6, 4), v:115, form:'kunai', color:'cyan'}});
+        fanOf(e.x, e.y, aimFrom(e.x, e.y), byRank([1, 3, 3, 5]), .12, 250, 'kunai', 'purple');
+        return byRank([1, .82, .7, .62]);
+      }},
+      {move:'center', fire(e, k) { // 深層・万華鏡 — mirrored arms with sixfold symmetry
+        const sym = rank ? 6 : 4, off = .85 * Math.sin(e.t * 1.2);
+        for (let i = 0; i < sym; i++) {
+          const base = i * tau / sym + e.t * .22;
+          shoot(e.x, e.y, base + off, 145, 'rice', 'cyan');
+          shoot(e.x, e.y, base - off, 145, 'rice', 'purple');
+        }
+        if (k % 15 === 0) ringOf(e.x, e.y, count(12, 8), k * .1, 66, 'big', 'white');
+        return byRank([.16, .125, .105, .095]);
+      }}
+    ]
+  },
+  { // 紅葉の渡廊 — leaves, rondos, bonfires, rain, an inverted fountain
+    mid: {move:'wander', fire(e, k) {
+      fanOf(e.x, e.y, aimFrom(e.x, e.y), byRank([3,5,5,7]), .2, 165, 'petal', k % 2 ? 'orange' : 'red', {g:40});
+      return byRank([.78, .66, .58, .5]);
+    }},
+    spells: [
+      {move:'sway', fire(e, k) { // 紅葉の舞曲
+        for (let i = 0; i < count(2, 1); i++)
+          shoot(rnd(10, width - 10), -12, Math.PI / 2, rnd(55, 95), 'petal', ['red','orange','gold'][(k + i) % 3],
+            {swing:{amp:.7, freq:rnd(1.6, 2.4), ph:rnd(0, tau)}, grace:1});
+        if (k % 10 === 0) ringOf(e.x, e.y, count(18), k * .07, 112, 'rice', 'red');
+        return .1;
+      }},
+      {move:'center', fire(e, k) { // 落葉の輪舞 — every ring curls one way, then the other
+        const s = k % 2 ? 1 : -1;
+        ringOf(e.x, e.y, count(16), k * .11, 135, 'petal', s > 0 ? 'orange' : 'gold', {w:s * 1.15, flipAt:.75, wEnd:1.5});
+        return byRank([.62, .5, .42, .36]);
+      }},
+      {move:'wander', fire(e, k) { // 紅橋の送り火
+        fanOf(e.x, e.y, aimFrom(e.x, e.y), 3, .55, 150, 'big', 'orange',
+          {acc:-120, vmin:18, split:{at:1.15, n:count(14, 8), v:100, form:'orb', color:'red',
+            inner:{n:count(7, 4), v:60, form:'orb', color:'gold'}}});
+        return byRank([1.45, 1.15, 1, .9]);
+      }},
+      {move:'center', fire(e, k) { // 錦秋の時雨
+        for (let i = 0; i < count(2, 1); i++) shoot(rnd(0, width), -12, Math.PI / 2 + .18 * Math.sin(e.t * .8), rnd(210, 250), 'rice', 'red', {grace:1});
+        if (k % 9 === 0) fanOf(e.x, e.y, aimFrom(e.x, e.y), byRank([3,5,5,7]), .16, 150, 'petal', 'orange');
+        return byRank([.13, .1, .09, .08]);
+      }},
+      {move:'center', fire(e, k) { // 千樹・逆さ紅葉 — a fountain of leaves arcing back down
+        for (let i = 0; i < count(5, 3); i++)
+          shoot(e.x, e.y, -Math.PI / 2 + rnd(-1.05, 1.05), rnd(190, 270), 'petal', ['red','orange','gold'][i % 3], {g:170, vfall:170, grace:3});
+        if (k % 6 === 0) ringOf(e.x, e.y, count(20), k * .09, 105, 'rice', 'red', {w:.25, wEnd:2});
+        return byRank([.26, .2, .17, .15]);
+      }}
+    ]
+  },
+  { // 雪鐘の峠 — echoes, chords, twin bells, icicles on a staff, a great bell
+    mid: {move:'wander', fire(e, k) {
+      const n = count(18);
+      ringOf(e.x, e.y, n, k * .2, 100, 'orb', 'white');
+      ringOf(e.x, e.y, n, k * .2 + Math.PI / n, 128, 'orb', 'cyan');
+      if (k % 2) fanOf(e.x, e.y, aimFrom(e.x, e.y), 3, .2, 150, 'ball', 'blue');
+      return byRank([1.15, 1, .92, .82]);
+    }},
+    spells: [
+      {move:'center', fire(e, k) { // 雪鈴の余韻 — one ring and three fading echoes
+        const n = count(20), o = k * .13;
+        [150, 125, 100, 78].forEach((v, i) => ringOf(e.x, e.y, n, o, v, 'ball', ['cyan','blue','white','white'][i], {delay:i * .16}));
+        return byRank([1.5, 1.2, 1.05, .95]);
+      }},
+      {move:'center', fire(e, k) { // 初雪の和音 — three rings at speeds 4:5:6, a major triad
+        const n = count(16), st = tau / n, o = k * .21;
+        ringOf(e.x, e.y, n, o, 100, 'orb', 'white');
+        ringOf(e.x, e.y, n, o + st / 3, 125, 'orb', 'cyan');
+        ringOf(e.x, e.y, n, o + st * 2 / 3, 150, 'orb', 'blue');
+        return byRank([1, .8, .7, .62]);
+      }},
+      {move:'center', fire(e, k) { // 双鐘共鳴
+        const s = k % 2 ? 1 : -1;
+        e.sats = [[e.x - 125, e.y + 20, 'white'], [e.x + 125, e.y + 20, 'blue']];
+        ringOf(e.x + s * 125, e.y + 20, count(22), k * .1, 120, 'ball', s > 0 ? 'blue' : 'white');
+        return byRank([.8, .6, .52, .45]);
+      }},
+      {move:'center', fire(e, k) { // 氷柱の五線譜 — icicles freeze on a staff line, then drop
+        const y = 64 + (k % 5) * 34, gap = clamp(player.x + rnd(-60, 60), 50, width - 50), spacing = byRank([52, 44, 38, 34]);
+        for (let x = 12; x < width; x += spacing)
+          if (Math.abs(x - gap) > 52) shoot(x, y, Math.PI / 2, 0, 'kunai', 'white', {hold:.75, acc:280, vmax:320});
+        ringOf(e.x, e.y, 8, k * .4, 85, 'note', 'gold');
+        return byRank([1.25, 1, .85, .75]);
+      }},
+      {move:'center', fire(e, k) { // 残響・白夜の大鐘
+        for (const s of [0, Math.PI]) shoot(e.x, e.y, e.t * 1.25 + s, 125, 'orb', 'blue');
+        if (Math.random() < .6 * densityScale())
+          shoot(rnd(0, width), -10, Math.PI / 2 + rnd(-.2, .2), rnd(50, 80), 'orb', 'white', {swing:{amp:.35, freq:2, ph:rnd(0, tau)}, grace:1});
+        if (k % 11 === 0) {
+          const n = count(36, 18);
+          ringOf(e.x, e.y, n, k * .05, 118, 'ball', 'white');
+          ringOf(e.x, e.y, n, k * .05 + Math.PI / n, 96, 'ball', 'cyan');
+        }
+        return byRank([.14, .12, .11, .1]);
+      }}
+    ]
+  },
+  { // 蝕月の浮宮 — constellations, a waning dome, binary stars, meteors, the eclipse
+    mid: {move:'wander', fire(e, k) {
+      ringOf(e.x, e.y, count(12), k * .3, 120, 'star', 'gold');
+      if (k % 2) fanOf(e.x, e.y, aimFrom(e.x, e.y), byRank([3,5,5,7]), .14, 170, 'rice', 'purple');
+      return byRank([.9, .78, .7, .62]);
+    }},
+    spells: [
+      {move:'center', fire(e, k) { // 黄道の夜想曲 — twelve tiny constellations
+        const n = rank ? 12 : 8;
+        for (let i = 0; i < n; i++) {
+          const a = i * tau / n + k * .13;
+          shoot(e.x, e.y, a, 120, 'star', 'gold');
+          shoot(e.x, e.y, a - .05, 106, 'orb', 'purple');
+          shoot(e.x, e.y, a + .05, 106, 'orb', 'purple');
+        }
+        return byRank([1.05, .85, .72, .62]);
+      }},
+      {move:'center', fire(e, k) { // 欠けゆく天蓋 — a dome whose opening swings and narrows
+        const n = count(40, 24), gap = Math.PI / 2 + 1.25 * Math.sin(e.t * .7), w = Math.max(.42, .85 - e.t * .012);
+        for (let i = 0; i < n; i++) {
+          const a = i * tau / n + k * .05;
+          if (Math.abs(Math.atan2(Math.sin(a - gap), Math.cos(a - gap))) > w / 2) shoot(e.x, e.y, a, 140, 'orb', k % 2 ? 'purple' : 'blue');
+        }
+        return byRank([.42, .32, .27, .24]);
+      }},
+      {move:'center', fire(e, k) { // 双星の軌道
+        e.sats = [];
+        for (const s of [-1, 1]) {
+          const x = e.x + s * 92 * Math.cos(e.t * 1.35), y = e.y + 10 + s * 48 * Math.sin(e.t * 1.35);
+          const color = s > 0 ? 'gold' : 'purple';
+          e.sats.push([x, y, color]);
+          shoot(x, y, e.t * 2.3, 130, 'orb', color);
+          shoot(x, y, e.t * 2.3 + Math.PI, 130, 'orb', color);
+        }
+        if (k % 13 === 0) ringOf(e.x, e.y, count(16), k * .1, 95, 'ball', 'white');
+        return byRank([.13, .1, .085, .075]);
+      }},
+      {move:'wander', fire(e, k) { // 紫紺の流星群
+        shoot(rnd(30, width - 30), -15, Math.PI / 2 + rnd(-.35, .35), rnd(190, 240), 'big', 'purple',
+          {split:{at:rnd(.55, .95), n:count(10, 6), v:95, form:'star', color:'gold'}, grace:1});
+        if (k % 3 === 0) fanOf(e.x, e.y, aimFrom(e.x, e.y), byRank([1, 3, 3, 5]), .15, 200, 'kunai', 'blue');
+        return byRank([.58, .45, .38, .33]);
+      }},
+      {move:'center', fire(e, k) { // 終蝕・夜明けの環 — gold and violet rings weave a lattice
+        const n = count(20);
+        ringOf(e.x, e.y, n, k * .11, 120, 'ball', 'gold', {w:.42, wEnd:2.5});
+        ringOf(e.x, e.y, n, -k * .11, 120, 'ball', 'purple', {w:-.42, wEnd:2.5});
+        if (k % 3 === 0) ringOf(e.x, e.y, count(16), k * .2, 220, 'kunai', 'white',
+          {acc:-280, aimAt:1, aimV:0, aimAcc:200, aimMax:230, jitter:.08, recolor:'gold'});
+        return byRank([.8, .64, .54, .48]);
+      }}
+    ]
+  }
+];
+const codaBook = [null,
+  {move:'center', fire(e, k) { // 逆さの産声 — bullets are born far away and fall inward
+    if (k % 5 === 0) {
+      const n = count(16), o = k * .19;
+      for (let i = 0; i < n; i++) {
+        const a = o + i * tau / n;
+        shoot(e.x + Math.cos(a) * 300, e.y + Math.sin(a) * 300, a + Math.PI, 0, 'orb', 'pink', {hold:.55, acc:180, vmax:120, grace:5});
       }
-    } else if (phase === 3) {
-      for (let i = 0; i < rays; i++) {
-        const gap = 40 + (width - 80) * (.5 + .45 * Math.sin(n * .52));
-        const x = (i + .5) * width / rays;
-        if (Math.abs(x - gap) > 41) emit({ x, y: -12 }, Math.PI / 2, 145, 'star');
-      }
-      ring(enemy, rays - 2, n * .23, 116, 'note', -.12);
-    } else {
-      ring(enemy, rays + 4, n * .19, 142, 'seed', .19);
-      ring(enemy, rays - 3, -n * .17, 112, 'pearl', -.17);
     }
-    if (phase !== 2 && n % 3 === 0) {
-      for (let i = -rank-1; i <= rank+1; i++) emit(enemy, aim + i * .16, 159, 'moon');
+    for (const s of [0, Math.PI]) shoot(e.x, e.y, -e.t * 1.4 + s, 118, 'rice', 'purple');
+    return byRank([.14, .12, .1, .09]);
+  }},
+  {move:'center', fire(e, k) { // 双子の心拍 — lub-dub
+    const n = count(28, 16);
+    ringOf(e.x, e.y, n, k * .17, 150, 'ball', 'red');
+    ringOf(e.x, e.y, n, k * .17 + Math.PI / n, 150, 'ball', 'pink', {delay:.2});
+    if (k % 2 === 0) fanOf(e.x, e.y, aimFrom(e.x, e.y), 3, .3, 108, 'big', 'pink');
+    return byRank([1.4, 1.15, 1, .9]);
+  }},
+  {move:'center', fire(e, k) { // 喰月の輪唱 — three voices sing the same spiral in a round
+    ['pink', 'purple', 'cyan'].forEach((color, v) => {
+      if (e.t < v * .6) return;
+      const a = (e.t - v * .6) * 1.7 + v * tau / 9;
+      for (let i = 0; i < 3; i++) shoot(e.x, e.y, a + i * tau / 3, 138, 'rice', color);
+    });
+    return byRank([.16, .125, .1, .09]);
+  }},
+  {move:'center', fire(e, k) { // 明け渡す空
+    const sym = rank ? 5 : 4, off = .9 * Math.sin(e.t * 1.1);
+    for (let i = 0; i < sym; i++) {
+      const base = i * tau / sym - e.t * .3;
+      shoot(e.x, e.y, base + off, 140, 'rice', 'pink');
+      shoot(e.x, e.y, base - off, 140, 'rice', 'gold');
     }
-    enemy.cooldown = .84 - .075 * rank - .074 * phase;
-  } else {
-    const style = spirits[enemy.kind];
-    const {fan, shotStride} = densities[rank];
-    const count = fan / shotStride;
-    for (let i = 0; i < count; i++) {
-      emit(enemy, aim + (i - (count-1)/2) * .18 * (fan-1)/(count-1), style.speed * 1.08, style.form);
-    }
-    enemy.cooldown = style.interval * densities[rank].cooldown - .12 * rank;
+    if (k % 16 === 0) ringOf(e.x, e.y, count(24), k * .1, 230, 'star', 'white',
+      {acc:-300, aimAt:1, aimV:0, aimAcc:210, aimMax:220, jitter:.1, recolor:'pink'});
+    return byRank([.16, .125, .105, .095]);
+  }}
+];
+const mobStyles = {
+  fox:      (e, a) => fanOf(e.x, e.y, a, byRank([1,3,3,5]), .2, 150, 'orb', 'pink'),
+  crane:    (e, a) => fanOf(e.x, e.y, a, byRank([1,1,2,3]), .1, 215, 'kunai', 'cyan'),
+  moth:     (e, a) => ringOf(e.x, e.y, byRank([5,8,8,12]), rnd(0, tau), 100, 'orb', 'purple'),
+  turtle:   (e, a) => fanOf(e.x, e.y, a, byRank([1,1,3,3]), .35, 95, 'big', 'green'),
+  umbrella: (e, a) => fanOf(e.x, e.y, a, byRank([3,3,5,7]), .28, 128, 'star', 'gold'),
+  mob2:     (e, a) => fanOf(e.x, e.y, a, byRank([1,3,3,5]), .16, 170, 'rice', 'cyan'),
+  mob3:     (e, a) => fanOf(e.x, e.y, a, byRank([2,3,4,5]), .3, 150, 'petal', 'orange', {g:45}),
+  mob4:     (e, a) => ringOf(e.x, e.y, byRank([6,8,10,12]), a, 105, 'orb', 'white'),
+  mob5:     (e, a) => fanOf(e.x, e.y, a, byRank([1,3,3,5]), .18, 140, 'star', 'purple')
+};
+function currentPattern(e) {
+  if (e.kind === 'mid') return e.phase === 1 ? patternBook[chapterIndex].mid : patternBook[chapterIndex].spells[0];
+  return hiddenBoss ? codaBook[e.phase] : patternBook[chapterIndex].spells[e.phase];
+}
+function volley(enemy) {
+  const n = enemy.volley++;
+  if (enemy.kind === 'boss' || enemy.kind === 'mid') {
+    enemy.cooldown = currentPattern(enemy).fire(enemy, n);
     return;
   }
-
-  // Keep alternating rays of each boss pattern while preserving its firing rhythm.
-  if (densities[rank].shotStride === 2) {
-    let kept = firstBullet;
-    for (let i = firstBullet + n % 2; i < bullets.length; i += 2) {
-      bullets[kept++] = bullets[i];
-    }
-    bullets.length = kept;
-  }
+  mobStyles[enemy.kind](enemy, aimFrom(enemy.x, enemy.y));
+  enemy.cooldown = spirits[enemy.kind].interval * densities[rank].cooldown - .12 * rank;
 }
 
-function chapterVolley(enemy, aim, n) {
-  const mid = enemy.kind === 'mid';
-  const phase = mid ? 1 : enemy.phase;
-  const rays = densities[rank].rays - 4 + phase;
-  const form = mid ? 'note' : ['','seed','star','pearl','moon'][chapterIndex];
-  switch (chapterIndex) {
-    case 1: // Twin facets split apart around the stream.
-      for (const side of [-1,1]) {
-        ring({x:enemy.x + side*48,y:enemy.y}, rays, side*n*.17, 110+phase*6, form, side*.16);
-      }
-      break;
-    case 2: // Rotating fans leave a corridor between their leaves.
-      for (let fan=0; fan<3; fan++) {
-        for (let i=0; i<4+rank+phase; i++) bloom(enemy, fan*tau/3+n*.21+i*.10, 116+i*5, form, .16, n*.3);
-      }
-      break;
-    case 3: // Staggered chimes fall from above with a moving opening.
-      for (let i=0; i<rays+4; i++) {
-        const x=(i+.5)*width/(rays+4), gap=width/2+168*Math.sin(n*.47);
-        if (Math.abs(x-gap)>45) emit({x,y:-13}, Math.PI/2+.10*Math.sin(n+i), 120+phase*7, form);
-      }
-      if (n%2===0) ring(enemy,rays,n*.15,110,'star');
-      break;
-    case 4: // Crescent satellites orbit the eclipse and counter-rotate.
-      for (const side of [-1,1]) {
-        const sat={x:enemy.x+side*80*Math.cos(n*.27),y:enemy.y+side*48*Math.sin(n*.27)};
-        ring(sat,rays,side*n*.29,106+phase*9,mid?'note':side>0?'moon':'seed',side*.21);
-      }
-      break;
-  }
-  if (phase >= 2 && n%2 === 0) {
-    for (let i=-rank-1; i<=rank+1; i++) emit(enemy,aim+i*.17,156,'pearl');
-  }
-  if (phase >= 3 && n%3 === 1) ring(enemy,rays,aim,138,'star',-.12);
-  enemy.cooldown = (mid ? .90 : .98) - .065*rank - .08*phase;
-}
 
 const spirits = {
   mob2: { size:48, hp:6, form:'seed', speed:148, interval:2.9 },
@@ -1072,10 +1638,12 @@ function announce(enemy, spell) {
   soundCue('spell');
   enemy.captureName = chapter.spells[spell];
   warning = { spell, left: 1.9 };
-  bullets = [];
+  cancelBullets(true);
   shots = [];
   enemy.cooldown = .25;
   enemy.volley = 0;
+  enemy.t = 0; enemy.goal = null; enemy.sats = null;
+  if (enemy.kind === 'boss') { enemy.timer = spell === 4 ? 55 : 42; lastTick = 99; }
   document.querySelector('#boss-name').textContent = chapter.names[spell ? 1 : 0] + ' ／ ' + chapter.spells[spell];
 }
 
@@ -1099,10 +1667,10 @@ function spawnBoss(final, secret = false) {
   if (secret) chapter = {...chapters[4], names:coda.names, spells:coda.spells};
   if (final && !secret) queenBombed = false;
   stage = final ? 'final' : 'crossing';
-  const hp = final ? 1500 + 450 * rank + chapterIndex * 150 : 410 + 70 * rank + chapterIndex * 45;
+  const hp = Math.round((final ? (1500 + 450 * rank + chapterIndex * 150) * 1.65 : (410 + 70 * rank + chapterIndex * 45) * 1.4) * (secret ? 1.5 : 1));
   const enemy = {
     kind: final ? 'boss' : 'mid', x: width / 2, y: 114, radius: final ? 34 : 28,
-    hp: secret ? hp*1.5 : hp, maxHP: secret ? hp*1.5 : hp, volley: 0, age: 0, phase: 1
+    hp, maxHP: hp, volley: 0, age: 0, phase: 1, t: 0
   };
   enemies = [enemy];
   bossPanel.hidden = false;
@@ -1165,8 +1733,17 @@ function updateEnemies(dt) {
     if (enemy.hp <= 0) continue;
     enemy.age += dt;
     if (enemy.kind === 'boss' || enemy.kind === 'mid') {
-      enemy.y = Math.min(133, enemy.y + 106 * dt);
-      enemy.x = width / 2 + Math.sin(Math.max(0, enemy.age - 1.9) * .75) * 96;
+      const move = currentPattern(enemy).move;
+      enemy.t += dt;
+      let tx = width / 2, ty = 128;
+      if (move === 'wander') {
+        if (!enemy.goal || enemy.t >= enemy.goal.until)
+          enemy.goal = {x: rnd(150, width - 150), y: rnd(100, 165), until: enemy.t + rnd(2.2, 3.4)};
+        tx = enemy.goal.x; ty = enemy.goal.y;
+      } else if (move === 'sway') tx = width / 2 + 70 * Math.sin(enemy.t * .6);
+      const ease = Math.min(1, dt * 2.2);
+      enemy.x += (tx - enemy.x) * ease;
+      enemy.y += (ty - enemy.y) * ease;
     } else {
       if (enemy.age < 0) continue;
       followConvoy(enemy);
@@ -1180,8 +1757,9 @@ function updateEnemies(dt) {
 
 function updateBossHP(enemy) {
   bossHP.value = enemy.hp;
-  const clock = enemy.kind === 'mid' && enemy.phase === 2 ? ' · ' + Math.ceil(enemy.sealLeft) + '秒' : '';
-  meterLabel.textContent = 'HP ' + enemy.hp + ' / ' + enemy.maxHP + clock;
+  const left = enemy.kind === 'mid' ? (enemy.phase === 2 ? enemy.sealLeft : null) : enemy.timer;
+  const clock = left != null ? ' · ' + Math.ceil(left) + '秒' : '';
+  meterLabel.textContent = 'HP ' + Math.ceil(enemy.hp) + ' / ' + Math.ceil(enemy.maxHP) + clock;
 }
 
 function damageEnemy(enemy, amount) {
@@ -1189,7 +1767,7 @@ function damageEnemy(enemy, amount) {
   const mid = enemy.kind === 'mid', final = enemy.kind === 'boss';
   enemy.hp = Math.max(0, enemy.hp - amount);
   if (mid && enemy.phase === 1 && enemy.hp <= enemy.maxHP / 2) {
-    enemy.hp = enemy.maxHP / 2;
+    enemy.hp = Math.ceil(enemy.maxHP / 2);
     enemy.phase = 2;
     enemy.sealLeft = sealDuration;
     announce(enemy, 0);
@@ -1232,7 +1810,8 @@ function awardShower(enemy, final) {
   stage = final ? 'finalReward' : 'midReward';
   rewardTime = 0;
   bossPanel.hidden = true;
-  enemies = []; bullets = []; shots = [];
+  cancelBullets(true);
+  enemies = []; shots = [];
   conversation(final, true);
   const count = final ? 48 : 32;
   for (let i = 0; i < count; i++) {
@@ -1246,32 +1825,40 @@ function awardShower(enemy, final) {
 function updateHazards(dt) {
   for (const bullet of bullets) {
     advanceBullet(bullet, dt);
-    const radius = forms[bullet.form].radius;
+    if (bullet.delay > 0 || bullet.dead) continue;
+    const radius = forms[bullet.form].hit;
     const distance = Math.hypot(bullet.x - player.x, bullet.y - player.y);
-    if (player.invincible > 0) continue;
+    if (player.invincible > 0 || player.hitPending > 0) continue;
     if (distance < player.radius + radius) {
       takeHit();
       break;
     }
-    if (distance < radius + 18 && !bullet.grazed) {
+    if (distance < radius + 20 && !bullet.grazed) {
       bullet.grazed = true;
       graze++;
-      score += 15;
+      score += 20;
+      soundCue('graze');
       updateHUD();
     }
   }
-  if (player.invincible <= 0 && enemies.some(enemy =>
+  if (player.invincible <= 0 && !player.hitPending && enemies.some(enemy =>
     Math.hypot(enemy.x - player.x, enemy.y - player.y) < enemy.radius + player.radius
   )) takeHit();
-  bullets = bullets.filter(bullet =>
-    bullet.x > -16 && bullet.x < width + 16 && bullet.y > -16 && bullet.y < height + 16
-  );
+  bullets = bullets.filter(b => !b.dead && (b.delay > 0 || b.t < (b.grace || 0) ||
+    (b.x > -40 && b.x < width + 40 && b.y > -40 && b.y < height + 40)));
+  if (spawned.length) { for (const b of spawned) bullets.push(b); spawned = []; }
 }
 
 function takeHit() {
-  for (const enemy of enemies) if (enemy.captureName) enemy.captureName = null;
+  if (player.hitPending > 0) return;
+  player.hitPending = .15;
   soundCue('hit');
+  burst(player.x, player.y, '#ffffff', 10);
+}
+function landHit() {
+  for (const enemy of enemies) if (enemy.captureName) enemy.captureName = null;
   player.life--;
+  bombs = Math.max(bombs, 3);
   player.invincible = 1.65;
   bullets = bullets.filter(bullet => Math.hypot(bullet.x - player.x, bullet.y - player.y) > 125);
   burst(player.x, player.y, '#ffd5a3', 25);
@@ -1290,6 +1877,10 @@ function update(dt) {
   }
   age += dt;
   bombLeft = Math.max(0, bombLeft - dt);
+  if (player.hitPending > 0) {
+    player.hitPending -= dt;
+    if (player.hitPending <= 0) { player.hitPending = 0; landHit(); if (mode !== 'playing') return; }
+  }
   if (warning) {
     warning.left -= dt;
     if (warning.left <= 0) warning = null;
@@ -1320,7 +1911,8 @@ function update(dt) {
     if (!item.reward) item.y += 89 * dt;
     const dx = player.x - item.x, dy = player.y - item.y;
     const distance = Math.hypot(dx, dy);
-    if (distance < 72 || item.reward) {
+    if (distance < 72 || item.reward || item.collect || player.y < 210) {
+      item.collect = true;
       item.x += dx * 8 * dt;
       item.y += dy * 8 * dt;
     }
@@ -1351,7 +1943,20 @@ function update(dt) {
     updateBossHP(mid);
     if (mid.sealLeft === 0) { awardShower(mid, false); return; }
   }
+  if (stage === 'final' && enemies[0]?.kind === 'boss' && enemies[0].timer > 0) {
+    const boss = enemies[0];
+    boss.timer = Math.max(0, boss.timer - dt);
+    const whole = Math.ceil(boss.timer);
+    if (whole <= 5 && whole < lastTick) { lastTick = whole; soundCue('tick'); }
+    updateBossHP(boss);
+    if (!boss.timer) {
+      boss.captureName = null;
+      damageEnemy(boss, boss.hp - Math.floor(boss.maxHP * (1 - boss.phase / 4)));
+      if (mode !== 'playing') return;
+    }
+  }
   updateShots(dt);
+  if (spawned.length) { for (const b of spawned) bullets.push(b); spawned = []; }
   if (bombLeft > 0) bullets = [];
   else if (mode === 'playing' && !warning) updateHazards(dt);
 }
@@ -1450,6 +2055,25 @@ function showSpell() {
   ctx.restore();
 }
 
+function drawBullets() {
+  // Large bullets go underneath so the small ones stay readable on top.
+  for (const pass of [0, 1]) {
+    for (const b of bullets) {
+      if (b.delay > 0 || (b.form === 'big') !== (pass === 0)) continue;
+      const img = bulletSprite(b.form, b.color), f = forms[b.form];
+      const birth = Math.min(1, b.t / .14);
+      const scale = .5 * (1 + (1 - birth) * 1.3);
+      const angle = f.dir ? b.a : f.spin ? b.t * 4 : 0;
+      ctx.globalAlpha = .35 + .65 * birth;
+      const c = Math.cos(angle) * scale, sn = Math.sin(angle) * scale;
+      ctx.setTransform(c, sn, -sn, c, b.x, b.y);
+      ctx.drawImage(img, -img.width / 2, -img.height / 2);
+    }
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+}
+
 function draw() {
   drawBackground();
   for (const shot of shots) {
@@ -1479,6 +2103,12 @@ function draw() {
       }
       drawCharacter(final ? chapter.boss : chapter.mid, enemy.x, enemy.y, final ? 108 : 88);
       ctx.restore();
+      for (const [x, y, color] of (!warning && enemy.sats) || []) {
+        const pulse = 1 + .15 * Math.sin(age * 8);
+        ctx.globalAlpha = .9;
+        ctx.drawImage(bulletSprite('big', color), x - 14 * pulse, y - 14 * pulse, 28 * pulse, 28 * pulse);
+        ctx.globalAlpha = 1;
+      }
     } else {
       if (enemy.age >= 0) drawCharacter(enemy.kind, enemy.x, enemy.y, spirits[enemy.kind].size);
     }
@@ -1501,25 +2131,20 @@ function draw() {
     ctx.restore();
 
   }
-  for (const bullet of bullets) {
-    const {radius,color} = forms[bullet.form];
-    if (bullet.form === 'note') {
-      drawNote(bullet.x, bullet.y, .2 * Math.sin(bullet.angle));
-      continue;
-    } else if (bullet.form === 'seed') oval(bullet.x,bullet.y,7,3,color,bullet.angle);
-    else if (bullet.form === 'star') {
-      const points = [];
-      for (let i=0;i<10;i++) {
-        const angle=i*tau/10+age, r=i%2 ? 4 : 8;
-        points.push([bullet.x+Math.cos(angle)*r,bullet.y+Math.sin(angle)*r]);
-      }
-      polygon(points,color);
-    } else oval(bullet.x,bullet.y,radius+1,radius+1,color);
-    oval(bullet.x,bullet.y,radius*.52,radius*.52,'#fff5e0');
-  }
+  drawBullets();
   if (player.life > 0) {
-    oval(player.x, player.y, player.radius + 2, player.radius + 2, '#18334b');
-    oval(player.x, player.y, player.radius, player.radius, '#f5fff8');
+    const focus = keys.has('ShiftLeft') || keys.has('ShiftRight');
+    if (focus) {
+      ctx.save();
+      ctx.translate(player.x, player.y);
+      ctx.rotate(age * 2.2);
+      ctx.strokeStyle = '#ffffffb0'; ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 5]);
+      ctx.beginPath(); ctx.arc(0, 0, 15, 0, tau); ctx.stroke();
+      ctx.restore();
+    }
+    oval(player.x, player.y, player.radius + 2.5, player.radius + 2.5, player.hitPending > 0 ? '#ff3355' : '#c2182f');
+    oval(player.x, player.y, player.radius + .5, player.radius + .5, '#ffffff');
   }
   for (const spark of sparks) {
     ctx.globalAlpha = spark.time * 2;
@@ -1565,6 +2190,10 @@ function frame(now) {
   if (mode !== 'paused') {
     scrollTime += dt;
     for (const spark of sparks) {
+      if (spark.home && spark.time < .45) {
+        spark.vx += (player.x - spark.x) * 9 * dt;
+        spark.vy += (player.y - spark.y) * 9 * dt;
+      }
       spark.x += spark.vx * dt;
       spark.y += spark.vy * dt;
       spark.time -= dt;
