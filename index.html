@@ -165,6 +165,21 @@ const ctx = canvas.getContext('2d');
 const width = 520;
 const height = 720;
 const tau = Math.PI * 2;
+// HiDPI rendering: the canvas backing store is scaled by devicePixelRatio
+// (capped at 2) while all game code keeps drawing in the logical 520x720
+// space. draw() installs this base transform every frame and drawBullets
+// composes its sprite transforms on top of it. fitCanvas() runs each frame,
+// so resizes, zoom and display changes are picked up automatically.
+let viewScale = 1, shakeX = 0, shakeY = 0;
+function fitCanvas() {
+  viewScale = Math.min(2, window.devicePixelRatio || 1);
+  const w = Math.round(width * viewScale), h = Math.round(height * viewScale);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+}
+function baseTransform() {
+  ctx.setTransform(viewScale, 0, 0, viewScale, shakeX * viewScale, shakeY * viewScale);
+}
+window.addEventListener('resize', fitCanvas);
 const scoreLabel = document.querySelector('#score');
 const lifeLabel = document.querySelector('#life');
 const grazeLabel = document.querySelector('#graze');
@@ -241,6 +256,9 @@ async function loadArtwork() {
 
 let mode = 'title';
 let player, enemies, bullets, shots, sparks;
+// Juice state: screen shake magnitude (logical px), hit-stop seconds left,
+// and the boss-death white flash (1 -> 0). Driven from frame().
+let shakeMag = 0, hitStop = 0, flash = 0;
 const pilotSelect = document.querySelector('#pilot');
 const loadouts = {
   rabbit: { name:'月うさぎ', portrait:'rabbit', info:'拡散型。被弾判定は自機中央の小さな点だけ（低速移動中に表示）。星猫が増え、扇状に援護射撃。ボム「月波」は画面全体を均等に攻撃。' },
@@ -349,14 +367,14 @@ const spriteCache = new Map();
 function bulletSprite(form, color) {
   const key = form + color;
   if (spriteCache.has(key)) return spriteCache.get(key);
-  const {r} = forms[form], pad = 5, half = r + pad;
+  const {r} = forms[form], pad = Math.round(r * .8) + 4, half = r + pad;
   const sheet = document.createElement('canvas');
   sheet.width = sheet.height = half * 4;
   const g = sheet.getContext('2d');
   g.scale(2, 2); g.translate(half, half);
   const hue = hues[color];
-  const glow = g.createRadialGradient(0, 0, r * .4, 0, 0, r + pad);
-  glow.addColorStop(0, hue + 'aa'); glow.addColorStop(1, hue + '00');
+  const glow = g.createRadialGradient(0, 0, r * .3, 0, 0, r + pad);
+  glow.addColorStop(0, hue + 'd9'); glow.addColorStop(.45, hue + '59'); glow.addColorStop(1, hue + '00');
   const shape = (scale, fill) => {
     g.fillStyle = fill; g.beginPath();
     const s = r * scale;
@@ -1049,6 +1067,7 @@ function useBomb() {
   if (!canBomb()) return;
   if (chapterIndex === 4 && stage === 'final' && !hiddenBoss) queenBombed = true;
   soundCue('bomb');
+  addShake(7);
   bombs--;
   bombX = player.x;
   bombLeft = bombDuration;
@@ -1739,6 +1758,18 @@ function spawnBoss(final, secret = false) {
   conversation(final, false);
 }
 
+// Lightweight pooled sparks on top of the shared sparks array. The pool is
+// capped so dense danmaku plus effects stay cheap on mobile.
+function spawnSparks(x, y, n, color, speed = 150, time = .3, size = 3) {
+  if (sparks.length > 420) return;
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * tau, v = speed * (.3 + Math.random() * .7);
+    sparks.push({x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+      time: time * (.6 + Math.random() * .7), color, size});
+  }
+}
+function addShake(mag) { shakeMag = Math.max(shakeMag, mag); }
+
 function burst(x, y, color, count) {
   for (let i = 0; i < count; i++) {
     const angle = i * tau / count + Math.random() * .4;
@@ -1881,6 +1912,8 @@ function damageEnemy(enemy, amount) {
   if (!mid && !final) drops.push({ x: enemy.x, y: enemy.y, kind: nextDrop() });
   score += final ? 5000 : 300;
   burst(enemy.x, enemy.y, final ? '#ffe4a4' : '#91f3cf', final ? 46 : 13);
+  if (final) { flash = 1; hitStop = Math.max(hitStop, .085); addShake(11); burst(enemy.x, enemy.y, '#ffffff', 22); }
+  else if (mid) { flash = Math.max(flash, .45); hitStop = Math.max(hitStop, .06); addShake(6); }
   updateHUD();
   if (mid || final) awardShower(enemy, final);
 }
@@ -1895,6 +1928,7 @@ function updateShots(dt) {
       const nearestY = clamp(enemy.y, shot.y, previousY);
       if (Math.hypot(enemy.x-shot.x, enemy.y-nearestY) >= enemy.radius+(shot.radius || 5)) continue;
       damageEnemy(enemy, shot.damage || 1);
+      spawnSparks(shot.x, shot.y, 2, '#ffe9b0', 120, .22, 2);
       if (shot.struck) { shot.struck.add(enemy); shot.hitsLeft--; }
       if (!shot.hitsLeft) { shot.y = -30; break; }
       if (warning || !enemies.length) break;
@@ -1935,6 +1969,7 @@ function updateHazards(dt) {
     }
     if (distance < radius + 20 && !bullet.grazed) {
       bullet.grazed = true;
+      spawnSparks(bullet.x, bullet.y, 2, '#bffbff', 90, .25, 2);
       graze++;
       score += 20;
       soundCue('graze');
@@ -1957,6 +1992,7 @@ function takeHit() {
   if (autoBombOn() && canBomb()) useBomb();
 }
 function landHit() {
+  addShake(6);
   for (const enemy of enemies) if (enemy.captureName) enemy.captureName = null;
   player.life--;
   bombs = Math.max(bombs, 3);
@@ -2065,7 +2101,7 @@ function update(dt) {
 
 function drawBackground() {
   ctx.fillStyle = '#0b0e21';
-  ctx.fillRect(0, 0, width, height);
+  ctx.fillRect(-16, -16, width + 32, height + 32);
   const river = artwork[chapter.map];
   if (!river) return;
   // Overlap the banks at the join so the river can scroll continuously.
@@ -2168,15 +2204,17 @@ function drawBullets() {
       const angle = f.dir ? b.a : f.spin ? b.t * 4 : 0;
       ctx.globalAlpha = .35 + .65 * birth;
       const c = Math.cos(angle) * scale, sn = Math.sin(angle) * scale;
-      ctx.setTransform(c, sn, -sn, c, b.x, b.y);
+      ctx.setTransform(c * viewScale, sn * viewScale, -sn * viewScale, c * viewScale,
+        (b.x + shakeX) * viewScale, (b.y + shakeY) * viewScale);
       ctx.drawImage(img, -img.width / 2, -img.height / 2);
     }
   }
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  baseTransform();
   ctx.globalAlpha = 1;
 }
 
 function draw() {
+  baseTransform();
   drawBackground();
   for (const shot of shots) {
     if (shot.struck) {
@@ -2208,7 +2246,7 @@ function draw() {
       for (const [x, y, color] of (!warning && enemy.sats) || []) {
         const pulse = 1 + .15 * Math.sin(age * 8);
         ctx.globalAlpha = .9;
-        ctx.drawImage(bulletSprite('big', color), x - 14 * pulse, y - 14 * pulse, 28 * pulse, 28 * pulse);
+        ctx.drawImage(bulletSprite('big', color), x - 22.4 * pulse, y - 22.4 * pulse, 44.8 * pulse, 44.8 * pulse);
         ctx.globalAlpha = 1;
       }
     } else {
@@ -2248,7 +2286,7 @@ function draw() {
   for (const spark of sparks) {
     ctx.globalAlpha = spark.time * 2;
     ctx.fillStyle = spark.color;
-    ctx.fillRect(spark.x, spark.y, 3, 3);
+    ctx.fillRect(spark.x, spark.y, spark.size || 3, spark.size || 3);
   }
   ctx.globalAlpha = 1;
   if (bombLeft > 0) {
@@ -2280,13 +2318,32 @@ function draw() {
   }
   bombButton.disabled = !canBomb();
   if (warning) showSpell();
+  if (flash > 0) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#ffffff';
+    ctx.globalAlpha = flash * .5;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.globalAlpha = 1;
+  }
 }
 
 let previous = performance.now();
 function frame(now) {
   const dt = Math.min(.033, (now - previous) / 1000);
   previous = now;
-  if (mode !== 'paused') {
+  fitCanvas();
+  // Hit-stop: world updates freeze for a few frames while rendering (and the
+  // flash/shake decay below) keeps running, for impact on boss/mid deaths.
+  const frozen = hitStop > 0;
+  if (frozen) hitStop -= dt;
+  if (flash > 0) flash = Math.max(0, flash - dt * 2.6);
+  if (shakeMag > 0) {
+    shakeX = rnd(-shakeMag, shakeMag);
+    shakeY = rnd(-shakeMag, shakeMag);
+    shakeMag *= Math.exp(-8 * dt);
+    if (shakeMag < .15) shakeMag = 0;
+  } else shakeX = shakeY = 0;
+  if (mode !== 'paused' && !frozen) {
     scrollTime += dt;
     for (const spark of sparks) {
       if (spark.home && spark.time < .45) {
@@ -2299,7 +2356,7 @@ function frame(now) {
     }
     sparks = sparks.filter(spark => spark.time > 0);
   }
-  if (mode === 'playing') update(dt);
+  if (mode === 'playing' && !frozen) update(dt);
   draw();
   requestAnimationFrame(frame);
 }
